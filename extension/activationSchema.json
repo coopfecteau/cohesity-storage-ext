@@ -88,7 +88,6 @@
           "description": "Sent as the apiKey header on every request. Accepted as-is: the extension only refuses an empty value or one containing whitespace, because the key format is not guaranteed to be the same across Cohesity 6.8 to 7.4 and rejecting a valid key is worse than surfacing a bad one as an authentication error.",
           "type": "secret",
           "nullable": true,
-          "default": "",
           "constraints": [
             {
               "type": "LENGTH",
@@ -141,7 +140,6 @@
           "description": "Leave empty for normal operation. When set, the extension reads every response from recorded JSON in this directory on the ActiveGate and makes no network calls at all - it is how the extension is demonstrated and debugged without a cluster. The responses shipped with the extension are SYNTHETIC: hand-written from Cohesity's published schemas, not captured from a cluster. Every poll logs a warning saying so.",
           "type": "text",
           "nullable": true,
-          "default": "",
           "constraints": [
             {
               "type": "LENGTH",
