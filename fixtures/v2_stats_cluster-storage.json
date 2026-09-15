@@ -1,0 +1,19 @@
+{
+  "_fixture": {
+    "provenance": "synthetic",
+    "description": "The seven headline capacity scalars. Parameterless endpoint, identical across 6.8-7.4.",
+    "source": "https://developers.cohesity.com/v1-cluster-7.4/reference/getclusterstoragestats.md",
+    "capturedAt": null,
+    "clusterVersion": "7.4",
+    "warning": "SYNTHETIC. Hand-written from the published response schema, never seen on a cluster. Field names are doc-derived; every value is invented. Do not read anything into the numbers."
+  },
+  "body": {
+    "totalCapacityBytes": 105553116266496,
+    "localUsageBytes": 41234567890123,
+    "localAvailableBytes": 64318548376373,
+    "dataProtectionLogicalUsageBytes": 219902325555200,
+    "dataProtectionPhysicalUsageBytes": 36507222016000,
+    "fileServicesLogicalUsageBytes": 8796093022208,
+    "fileServicesPhysicalUsageBytes": 4727272931328
+  }
+}

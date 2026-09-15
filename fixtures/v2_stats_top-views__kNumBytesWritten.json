@@ -1,0 +1,77 @@
+{
+  "_fixture": {
+    "provenance": "synthetic",
+    "description": "Top views ranked by kNumBytesWritten. 7.3+ path. Three views rather than the polled top 20, to keep the fixture readable.",
+    "source": "https://developers.cohesity.com/v1-cluster-7.4/reference/gettopviewsstats.md",
+    "capturedAt": null,
+    "clusterVersion": "7.4",
+    "warning": "SYNTHETIC. Hand-written from the published response schema, never seen on a cluster. Field names are doc-derived; every value is invented. Do not read anything into the numbers."
+  },
+  "body": {
+    "viewsStats": [
+      {
+        "viewId": 501,
+        "viewName": "prod-nfs-share",
+        "protocols": [
+          "NFS"
+        ],
+        "stats": [
+          {
+            "metric": "kNumBytesWritten",
+            "valueInLastHours": [
+              {
+                "lastHours": 1,
+                "value": 123456789012,
+                "nfsProtocolValue": 123456789012,
+                "smbProtocolValue": 0,
+                "s3ProtocolValue": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "viewId": 502,
+        "viewName": "sql-backup-target",
+        "protocols": [
+          "SMB"
+        ],
+        "stats": [
+          {
+            "metric": "kNumBytesWritten",
+            "valueInLastHours": [
+              {
+                "lastHours": 1,
+                "value": 876543210987,
+                "nfsProtocolValue": 0,
+                "smbProtocolValue": 876543210987,
+                "s3ProtocolValue": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "viewId": 503,
+        "viewName": "object-archive",
+        "protocols": [
+          "S3"
+        ],
+        "stats": [
+          {
+            "metric": "kNumBytesWritten",
+            "valueInLastHours": [
+              {
+                "lastHours": 1,
+                "value": 43210987654,
+                "nfsProtocolValue": 0,
+                "smbProtocolValue": 0,
+                "s3ProtocolValue": 43210987654
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

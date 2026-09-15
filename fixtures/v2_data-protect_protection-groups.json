@@ -1,0 +1,130 @@
+{
+  "_fixture": {
+    "provenance": "synthetic",
+    "description": "Four protection groups with includeLastRunInfo. One is paused, one's last run failed, one succeeded five days ago.",
+    "source": "https://developers.cohesity.com/v1-cluster-7.4/reference/getprotectiongroups.md",
+    "capturedAt": null,
+    "clusterVersion": "7.4",
+    "warning": "SYNTHETIC. Hand-written from the published response schema, never seen on a cluster. Field names are doc-derived; every value is invented. Do not read anything into the numbers. g-9004 is paused: its age-since-last-success rises forever, which is exactly the case ticket 06 has to decide how to treat."
+  },
+  "body": {
+    "protectionGroups": [
+      {
+        "id": "g-9001",
+        "name": "Nightly-VMware-Tier1",
+        "environment": "kVMware",
+        "policyId": "p-1001",
+        "storageDomainId": 1001,
+        "clusterId": 1234567890123456,
+        "isActive": true,
+        "isDeleted": false,
+        "isPaused": false,
+        "numProtectedObjects": 142,
+        "lastRun": {
+          "protectionGroupId": "g-9001",
+          "localBackupInfo": {
+            "status": "Succeeded",
+            "startTimeUsecs": 1789439400000000,
+            "endTimeUsecs": 1789441200000000,
+            "isSlaViolated": false,
+            "runType": "kRegular",
+            "successfulObjectsCount": 142,
+            "failedObjectsCount": 0,
+            "localSnapshotStats": {
+              "bytesRead": 483183820800,
+              "bytesWritten": 96636764160,
+              "logicalSizeBytes": 1099511627776
+            }
+          }
+        }
+      },
+      {
+        "id": "g-9002",
+        "name": "SQL-Hourly-Logs",
+        "environment": "kSQL",
+        "policyId": "p-1002",
+        "storageDomainId": 1001,
+        "clusterId": 1234567890123456,
+        "isActive": true,
+        "isDeleted": false,
+        "isPaused": false,
+        "numProtectedObjects": 18,
+        "lastRun": {
+          "protectionGroupId": "g-9002",
+          "localBackupInfo": {
+            "status": "Failed",
+            "startTimeUsecs": 1789468200000000,
+            "endTimeUsecs": 1789470000000000,
+            "isSlaViolated": true,
+            "runType": "kRegular",
+            "successfulObjectsCount": 14,
+            "failedObjectsCount": 4,
+            "localSnapshotStats": {
+              "bytesRead": 483183820800,
+              "bytesWritten": 96636764160,
+              "logicalSizeBytes": 1099511627776
+            }
+          }
+        }
+      },
+      {
+        "id": "g-9003",
+        "name": "NAS-Weekly",
+        "environment": "kGenericNas",
+        "policyId": "p-1003",
+        "storageDomainId": 1003,
+        "clusterId": 1234567890123456,
+        "isActive": true,
+        "isDeleted": false,
+        "isPaused": false,
+        "numProtectedObjects": 6,
+        "lastRun": {
+          "protectionGroupId": "g-9003",
+          "localBackupInfo": {
+            "status": "SucceededWithWarning",
+            "startTimeUsecs": 1789039800000000,
+            "endTimeUsecs": 1789041600000000,
+            "isSlaViolated": false,
+            "runType": "kRegular",
+            "successfulObjectsCount": 6,
+            "failedObjectsCount": 0,
+            "localSnapshotStats": {
+              "bytesRead": 483183820800,
+              "bytesWritten": 96636764160,
+              "logicalSizeBytes": 1099511627776
+            }
+          }
+        }
+      },
+      {
+        "id": "g-9004",
+        "name": "Decommissioned-Lab",
+        "environment": "kVMware",
+        "policyId": "p-1004",
+        "storageDomainId": 1002,
+        "clusterId": 1234567890123456,
+        "isActive": false,
+        "isDeleted": false,
+        "isPaused": true,
+        "numProtectedObjects": 3,
+        "lastRun": {
+          "protectionGroupId": "g-9004",
+          "localBackupInfo": {
+            "status": "Succeeded",
+            "startTimeUsecs": 1786015800000000,
+            "endTimeUsecs": 1786017600000000,
+            "isSlaViolated": false,
+            "runType": "kRegular",
+            "successfulObjectsCount": 3,
+            "failedObjectsCount": 0,
+            "localSnapshotStats": {
+              "bytesRead": 483183820800,
+              "bytesWritten": 96636764160,
+              "logicalSizeBytes": 1099511627776
+            }
+          }
+        }
+      }
+    ]
+  }
+}

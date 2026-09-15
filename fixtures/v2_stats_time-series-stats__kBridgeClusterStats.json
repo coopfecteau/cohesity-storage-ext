@@ -1,0 +1,44 @@
+{
+  "_fixture": {
+    "provenance": "synthetic",
+    "description": "Garbage awaiting reclamation. 720s rollup, so it is polled every 30 minutes, not every minute.",
+    "source": "https://developers.cohesity.com/v1-cluster-7.4/reference/gettimeseriesstats.md",
+    "capturedAt": null,
+    "clusterVersion": "7.4",
+    "warning": "SYNTHETIC. Hand-written from the published response schema, never seen on a cluster. Field names are doc-derived; every value is invented. Do not read anything into the numbers."
+  },
+  "body": {
+    "timeSeriesStats": [
+      {
+        "metricName": "kMorphedGarbageBytes",
+        "type": "kInt64",
+        "dataPoints": [
+          {
+            "timestampMsecs": 1789470720000,
+            "int64Value": 1099511627776,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789471440000,
+            "int64Value": 1123456789012,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789472160000,
+            "int64Value": 1150000000000,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789472880000,
+            "int64Value": 1176821309440,
+            "doubleValue": null,
+            "stringValue": null
+          }
+        ]
+      }
+    ]
+  }
+}

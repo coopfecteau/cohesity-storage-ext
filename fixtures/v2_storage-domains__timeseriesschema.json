@@ -1,0 +1,77 @@
+{
+  "_fixture": {
+    "provenance": "synthetic",
+    "description": "The (schemaName, metricName, entityId) triples time-series-stats demands. The only supported v2 discovery path.",
+    "source": "https://developers.cohesity.com/v1-cluster-7.4/reference/getstoragedomains.md",
+    "capturedAt": null,
+    "clusterVersion": "7.4",
+    "warning": "SYNTHETIC. Hand-written from the published response schema, never seen on a cluster. Field names are doc-derived; every value is invented. Do not read anything into the numbers. entityId is shown as the bare storage-domain id because nothing documents its real form; treat the format as unverified."
+  },
+  "body": {
+    "storageDomains": [
+      {
+        "id": 1001,
+        "name": "DefaultStorageDomain",
+        "schemas": [
+          {
+            "schemaName": "kBridgeViewBoxStats",
+            "metricName": "kMorphedUsageBytes",
+            "entityId": "1001"
+          },
+          {
+            "schemaName": "kBridgeViewBoxStats",
+            "metricName": "kDataInBytes",
+            "entityId": "1001"
+          },
+          {
+            "schemaName": "kBridgeViewBoxStats",
+            "metricName": "kDataWrittenBytes",
+            "entityId": "1001"
+          }
+        ]
+      },
+      {
+        "id": 1002,
+        "name": "FileServices",
+        "schemas": [
+          {
+            "schemaName": "kBridgeViewBoxStats",
+            "metricName": "kMorphedUsageBytes",
+            "entityId": "1002"
+          },
+          {
+            "schemaName": "kBridgeViewBoxStats",
+            "metricName": "kDataInBytes",
+            "entityId": "1002"
+          },
+          {
+            "schemaName": "kBridgeViewBoxStats",
+            "metricName": "kDataWrittenBytes",
+            "entityId": "1002"
+          }
+        ]
+      },
+      {
+        "id": 1003,
+        "name": "LongTermArchive",
+        "schemas": [
+          {
+            "schemaName": "kBridgeViewBoxStats",
+            "metricName": "kMorphedUsageBytes",
+            "entityId": "1003"
+          },
+          {
+            "schemaName": "kBridgeViewBoxStats",
+            "metricName": "kDataInBytes",
+            "entityId": "1003"
+          },
+          {
+            "schemaName": "kBridgeViewBoxStats",
+            "metricName": "kDataWrittenBytes",
+            "entityId": "1003"
+          }
+        ]
+      }
+    ]
+  }
+}

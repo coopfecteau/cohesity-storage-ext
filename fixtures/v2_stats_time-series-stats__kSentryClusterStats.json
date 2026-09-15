@@ -1,0 +1,86 @@
+{
+  "_fixture": {
+    "provenance": "synthetic",
+    "description": "Cluster CPU and memory percentages. kDouble values, and one deliberately null tail point.",
+    "source": "https://developers.cohesity.com/v1-cluster-7.4/reference/gettimeseriesstats.md",
+    "capturedAt": null,
+    "clusterVersion": "7.4",
+    "warning": "SYNTHETIC. Hand-written from the published response schema, never seen on a cluster. Field names are doc-derived; every value is invented. Do not read anything into the numbers."
+  },
+  "body": {
+    "timeSeriesStats": [
+      {
+        "metricName": "kCpuUsagePct",
+        "type": "kDouble",
+        "dataPoints": [
+          {
+            "timestampMsecs": 1789472700000,
+            "int64Value": null,
+            "doubleValue": 31.2,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789472880000,
+            "int64Value": null,
+            "doubleValue": 34.8,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473060000,
+            "int64Value": null,
+            "doubleValue": 29.6,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473240000,
+            "int64Value": null,
+            "doubleValue": 41.3,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473420000,
+            "int64Value": null,
+            "doubleValue": 37.9,
+            "stringValue": null
+          }
+        ]
+      },
+      {
+        "metricName": "kMemoryUsagePct",
+        "type": "kDouble",
+        "dataPoints": [
+          {
+            "timestampMsecs": 1789472700000,
+            "int64Value": null,
+            "doubleValue": 62.4,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789472880000,
+            "int64Value": null,
+            "doubleValue": 63.1,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473060000,
+            "int64Value": null,
+            "doubleValue": 64.0,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473240000,
+            "int64Value": null,
+            "doubleValue": 63.7,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473600000,
+            "int64Value": null,
+            "doubleValue": null,
+            "stringValue": null
+          }
+        ]
+      }
+    ]
+  }
+}

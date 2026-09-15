@@ -1,0 +1,237 @@
+{
+  "dynatrace": "1",
+  "schemaId": "python-extension.activation",
+  "displayName": "Cohesity storage",
+  "description": "Poll a Cohesity cluster REST API for storage and protection metrics",
+  "documentation": "One endpoint is one Cohesity cluster. Authentication is a cluster API key, sent as the apiKey header - not a username and password, whose session token expires after 24 hours and would have to be refreshed. Generate the key in the Cohesity UI under Settings > Access Management > API Keys. The key can either be pasted into this configuration or held in the Dynatrace credential vault and selected here; exactly one of the two, and the extension refuses a configuration that sets both or neither.",
+  "ownerProductManagement": "custom",
+  "ownerDevelopment": "custom",
+  "maturity": "GENERAL_AVAILABILITY",
+  "allowedScopes": [
+    "tenant"
+  ],
+  "multiObject": false,
+  "types": {
+    "dynatrace.datasource.python:cohesity-cluster-endpoint": {
+      "type": "object",
+      "displayName": "Cohesity cluster",
+      "summaryPattern": "{name} ({host}:{port})",
+      "properties": {
+        "name": {
+          "displayName": "Cluster name",
+          "description": "Friendly name used in extension logs. Metric dimensions carry the cluster's own id and name, read from the API, so renaming this does not orphan anything.",
+          "type": "text",
+          "nullable": false,
+          "default": "",
+          "constraints": [
+            {
+              "type": "LENGTH",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          ],
+          "maxItems": 1
+        },
+        "host": {
+          "displayName": "Cluster host",
+          "description": "Hostname, VIP or IP address of the Cohesity cluster. The ActiveGate must be able to reach it.",
+          "type": "text",
+          "nullable": false,
+          "default": "",
+          "constraints": [
+            {
+              "type": "LENGTH",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          ],
+          "maxItems": 1
+        },
+        "port": {
+          "displayName": "HTTPS port",
+          "type": "integer",
+          "nullable": false,
+          "default": 443,
+          "constraints": [
+            {
+              "type": "RANGE",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          ],
+          "maxItems": 1
+        },
+        "useCredentialVault": {
+          "displayName": "Use credential vault",
+          "description": "Read the Cohesity API key from a stored Dynatrace credential instead of pasting it here. The ActiveGate resolves the vault entry and injects its value before the extension runs, so the key is never held in this monitoring configuration. Recommended when the same key is shared by more than one configuration, or when key rotation is owned by somebody other than whoever edits this page.",
+          "type": "boolean",
+          "nullable": false,
+          "default": false,
+          "maxItems": 1
+        },
+        "credentialVaultId": {
+          "displayName": "Select vault credentials",
+          "description": "The stored credential holding the Cohesity cluster API key. Create it under Settings > Credential vault as a token credential, and make sure its access scope lets this ActiveGate group read it - a credential the ActiveGate cannot read resolves to nothing, and the extension reports that as a vault problem rather than as a bad key.",
+          "type": "text",
+          "subType": "credential",
+          "referencedType": "TOKEN",
+          "nullable": true,
+          "maxItems": 1,
+          "precondition": {
+            "type": "EQUALS",
+            "property": "useCredentialVault",
+            "expectedValue": true
+          }
+        },
+        "apiKey": {
+          "displayName": "Cluster API key",
+          "description": "Sent as the apiKey header on every request. Accepted as-is: the extension only refuses an empty value or one containing whitespace, because the key format is not guaranteed to be the same across Cohesity 6.8 to 7.4 and rejecting a valid key is worse than surfacing a bad one as an authentication error.",
+          "type": "secret",
+          "nullable": true,
+          "default": "",
+          "constraints": [
+            {
+              "type": "LENGTH",
+              "maxLength": 200
+            }
+          ],
+          "maxItems": 1,
+          "precondition": {
+            "type": "AND",
+            "preconditions": [
+              {
+                "type": "NOT",
+                "precondition": {
+                  "type": "EQUALS",
+                  "property": "useCredentialVault",
+                  "expectedValue": true
+                }
+              }
+            ]
+          }
+        },
+        "verifyTls": {
+          "displayName": "Verify the cluster TLS certificate",
+          "description": "Leave on. Cohesity ships a self-signed certificate, so either trust its CA on the ActiveGate and point at it below, or accept that turning this off exposes the API key to anything that can answer for the cluster address.",
+          "type": "boolean",
+          "nullable": false,
+          "default": true,
+          "maxItems": 1
+        },
+        "caCertPath": {
+          "displayName": "CA certificate file path",
+          "description": "Absolute path on the ActiveGate, readable by the ActiveGate service user. Leave empty to use the system trust store.",
+          "type": "text",
+          "nullable": true,
+          "constraints": [
+            {
+              "type": "LENGTH",
+              "maxLength": 1000
+            }
+          ],
+          "maxItems": 1,
+          "precondition": {
+            "type": "EQUALS",
+            "property": "verifyTls",
+            "expectedValue": true
+          }
+        },
+        "fixtureDir": {
+          "displayName": "Fixture directory (replay mode)",
+          "description": "Leave empty for normal operation. When set, the extension reads every response from recorded JSON in this directory on the ActiveGate and makes no network calls at all - it is how the extension is demonstrated and debugged without a cluster. The responses shipped with the extension are SYNTHETIC: hand-written from Cohesity's published schemas, not captured from a cluster. Every poll logs a warning saying so.",
+          "type": "text",
+          "nullable": true,
+          "default": "",
+          "constraints": [
+            {
+              "type": "LENGTH",
+              "maxLength": 1000
+            }
+          ],
+          "maxItems": 1
+        },
+        "collectStorageDomains": {
+          "displayName": "Collect storage domain metrics",
+          "description": "Per storage domain (view box) capacity and consumption. Turning this off skips the API calls, not just the ingest.",
+          "type": "boolean",
+          "nullable": false,
+          "default": true,
+          "maxItems": 1
+        },
+        "collectNodes": {
+          "displayName": "Collect node metrics",
+          "description": "Per node capacity and health. Turning this off skips the API calls, not just the ingest.",
+          "type": "boolean",
+          "nullable": false,
+          "default": true,
+          "maxItems": 1
+        },
+        "collectProtection": {
+          "displayName": "Collect protection metrics",
+          "description": "Protection groups, their runs and SLA outcomes. This is the most expensive feature set on a large estate - one call per group per interval.",
+          "type": "boolean",
+          "nullable": false,
+          "default": true,
+          "maxItems": 1
+        },
+        "intervalMinutes": {
+          "displayName": "Poll every (minutes)",
+          "description": "Cluster capacity moves slowly. Polling faster than the cluster's own stats refresh only costs API calls.",
+          "type": "integer",
+          "nullable": false,
+          "default": 5,
+          "constraints": [
+            {
+              "type": "RANGE",
+              "minimum": 1,
+              "maximum": 1440
+            }
+          ],
+          "maxItems": 1
+        },
+        "requestTimeoutSeconds": {
+          "displayName": "Request timeout (seconds)",
+          "type": "integer",
+          "nullable": false,
+          "default": 30,
+          "constraints": [
+            {
+              "type": "RANGE",
+              "minimum": 1,
+              "maximum": 300
+            }
+          ],
+          "maxItems": 1
+        }
+      }
+    },
+    "pythonRemote": {
+      "type": "object",
+      "properties": {
+        "endpoints": {
+          "displayName": "Cohesity clusters",
+          "type": "list",
+          "items": {
+            "type": {
+              "$ref": "#/types/dynatrace.datasource.python:cohesity-cluster-endpoint"
+            }
+          },
+          "nullable": false,
+          "minItems": 1,
+          "maxItems": 100,
+          "metaData": {
+            "addItemButton": "Add cluster"
+          }
+        }
+      }
+    }
+  },
+  "properties": {
+    "pythonRemote": {
+      "displayName": "Cohesity storage",
+      "type": {
+        "$ref": "#/types/pythonRemote"
+      }
+    }
+  }
+}

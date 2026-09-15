@@ -1,0 +1,35 @@
+{
+  "_fixture": {
+    "provenance": "synthetic",
+    "description": "Cluster identity, software version and node roll-up. Drives id namespacing and the 7.3 views fork.",
+    "source": "https://developers.cohesity.com/v1-cluster-7.4/reference/getclusterstatus.md",
+    "capturedAt": null,
+    "clusterVersion": "7.4",
+    "warning": "SYNTHETIC. Hand-written from the published response schema, never seen on a cluster. Field names are doc-derived; every value is invented. Do not read anything into the numbers. softwareVersion is 7.4 here, so a client reading this fixture selects /v2/stats/top-views."
+  },
+  "body": {
+    "id": 1234567890123456,
+    "clusterId": 1234567890123456,
+    "name": "cohesity-demo-01",
+    "softwareVersion": "7.4.1_u2_release-20250104_abcdef12",
+    "clusterType": "kPhysical",
+    "isHealthy": true,
+    "nodeStatuses": [
+      {
+        "nodeId": 1234567890123457,
+        "ip": "10.20.30.41",
+        "isHealthy": true
+      },
+      {
+        "nodeId": 1234567890123458,
+        "ip": "10.20.30.42",
+        "isHealthy": true
+      },
+      {
+        "nodeId": 1234567890123459,
+        "ip": "10.20.30.43",
+        "isHealthy": true
+      }
+    ]
+  }
+}

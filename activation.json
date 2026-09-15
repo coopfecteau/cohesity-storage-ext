@@ -1,0 +1,48 @@
+{
+  "enabled": true,
+  "description": "Local development activation for dt-sdk run. Points at tools/local_cohesity_server.py, which serves the synthetic fixtures over HTTPS with a throwaway self-signed certificate - hence verifyTls false. Set fixtureDir instead of host to replay the same fixtures without a socket. AUTH: this file uses the inline mode ('useCredentialVault': false, 'apiKey' set), which is the only mode that works locally - there is no EEC here to resolve a vault entry, so selecting one would simply produce an empty credential. The vault shape is recorded below for reference only; see credentialVaultExample.",
+  "credentialVaultExample": {
+    "comment": "NOT READ BY THE EXTENSION. This is what one endpoint looks like once the ActiveGate has resolved a credential vault entry and injected it. Note the trap: the extension never sees 'credentialVaultId' carrying a secret - the EEC substitutes the resolved value into a DIFFERENT field, and which field that is is undocumented for referencedType TOKEN. cohesity_storage.config.VAULT_SECRET_FIELDS probes token, then password, then apiKey and takes the first non-empty, which is why this example shows 'token' but the code does not depend on it.",
+    "endpoint": {
+      "name": "cohesity-prod",
+      "host": "10.20.30.40",
+      "port": 443,
+      "useCredentialVault": true,
+      "credentialVaultId": "CREDENTIALS_VAULT-XXXXXXXXXXXXXXXX",
+      "token": "<injected by the EEC from the vault entry - never typed here>",
+      "verifyTls": true,
+      "caCertPath": "/opt/dynatrace/cohesity-ca.pem",
+      "fixtureDir": "",
+      "collectStorageDomains": true,
+      "collectNodes": true,
+      "collectProtection": true,
+      "intervalMinutes": 5,
+      "requestTimeoutSeconds": 30
+    }
+  },
+  "version": "0.0.1",
+  "activationContext": "REMOTE",
+  "featureSets": [
+    "cluster"
+  ],
+  "pythonRemote": {
+    "endpoints": [
+      {
+        "name": "fake-cluster",
+        "host": "127.0.0.1",
+        "port": 8443,
+        "useCredentialVault": false,
+        "credentialVaultId": "",
+        "apiKey": "{{cohesityApiKey}}",
+        "verifyTls": false,
+        "caCertPath": "",
+        "fixtureDir": "",
+        "collectStorageDomains": true,
+        "collectNodes": true,
+        "collectProtection": true,
+        "intervalMinutes": 1,
+        "requestTimeoutSeconds": 30
+      }
+    ]
+  }
+}

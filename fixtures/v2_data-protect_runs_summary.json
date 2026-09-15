@@ -1,0 +1,89 @@
+{
+  "_fixture": {
+    "provenance": "synthetic",
+    "description": "Five runs in one window: three terminal, one Running, one Missed. Exercises both the dedup ledger and the skip-non-terminal rule.",
+    "source": "https://developers.cohesity.com/v1-cluster-7.4/reference/getprotectionruns.md",
+    "capturedAt": null,
+    "clusterVersion": "7.4",
+    "warning": "SYNTHETIC. Hand-written from the published response schema, never seen on a cluster. Field names are doc-derived; every value is invented. Do not read anything into the numbers. r-70004 is Running with a null endTimeUsecs: it must be skipped WITHOUT being recorded, or its eventual outcome is lost."
+  },
+  "body": {
+    "protectionRunsSummary": [
+      {
+        "id": "r-70001",
+        "protectionGroupId": "g-9001",
+        "protectionGroupName": "Nightly-VMware-Tier1",
+        "environment": "kVMware",
+        "status": "Succeeded",
+        "startTimeUsecs": 1789472900000000,
+        "endTimeUsecs": 1789473480000000,
+        "bytesWritten": 96636764160,
+        "logicalSizeBytes": 1099511627776,
+        "isSlaViolated": false,
+        "successObjectsCount": 142,
+        "totalObjectsCount": 142,
+        "isFullRun": true
+      },
+      {
+        "id": "r-70002",
+        "protectionGroupId": "g-9002",
+        "protectionGroupName": "SQL-Hourly-Logs",
+        "environment": "kSQL",
+        "status": "Failed",
+        "startTimeUsecs": 1789472940000000,
+        "endTimeUsecs": 1789473120000000,
+        "bytesWritten": 0,
+        "logicalSizeBytes": 0,
+        "isSlaViolated": true,
+        "successObjectsCount": 14,
+        "totalObjectsCount": 18,
+        "isFullRun": false
+      },
+      {
+        "id": "r-70003",
+        "protectionGroupId": "g-9003",
+        "protectionGroupName": "NAS-Weekly",
+        "environment": "kGenericNas",
+        "status": "SucceededWithWarning",
+        "startTimeUsecs": 1789472700000000,
+        "endTimeUsecs": 1789473300000000,
+        "bytesWritten": 21474836480,
+        "logicalSizeBytes": 274877906944,
+        "isSlaViolated": false,
+        "successObjectsCount": 5,
+        "totalObjectsCount": 6,
+        "isFullRun": false
+      },
+      {
+        "id": "r-70004",
+        "protectionGroupId": "g-9002",
+        "protectionGroupName": "SQL-Hourly-Logs",
+        "environment": "kSQL",
+        "status": "Running",
+        "startTimeUsecs": 1789473510000000,
+        "endTimeUsecs": null,
+        "bytesWritten": null,
+        "logicalSizeBytes": null,
+        "isSlaViolated": false,
+        "successObjectsCount": 0,
+        "totalObjectsCount": 18,
+        "isFullRun": false
+      },
+      {
+        "id": "r-70005",
+        "protectionGroupId": "g-9001",
+        "protectionGroupName": "Nightly-VMware-Tier1",
+        "environment": "kVMware",
+        "status": "Missed",
+        "startTimeUsecs": 1789472800000000,
+        "endTimeUsecs": 1789472800000000,
+        "bytesWritten": 0,
+        "logicalSizeBytes": 0,
+        "isSlaViolated": true,
+        "successObjectsCount": 0,
+        "totalObjectsCount": 142,
+        "isFullRun": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "_fixture": {
+    "provenance": "synthetic",
+    "description": "Three storage domains with DataUsageStats. Note every *Bytes field has a paired *TimestampUsec: these stats are not live.",
+    "source": "https://developers.cohesity.com/v1-cluster-7.4/reference/getstoragedomains.md",
+    "capturedAt": null,
+    "clusterVersion": "7.4",
+    "warning": "SYNTHETIC. Hand-written from the published response schema, never seen on a cluster. Field names are doc-derived; every value is invented. Do not read anything into the numbers."
+  },
+  "body": {
+    "storageDomains": [
+      {
+        "id": 1001,
+        "name": "DefaultStorageDomain",
+        "clusterPartitionId": 3,
+        "stats": {
+          "totalLogicalUsageBytes": 219902325555200,
+          "totalLogicalUsageBytesTimestampUsec": 1789473540000000,
+          "localTotalPhysicalUsageBytes": 36507222016000,
+          "localTotalPhysicalUsageBytesTimestampUsec": 1789473540000000,
+          "cloudTotalPhysicalUsageBytes": 0,
+          "localTierResiliencyImpactBytes": 4398046511104,
+          "dataInBytes": 230897441832960,
+          "dataInBytesAfterDedup": 58411555225600,
+          "dataWrittenBytes": 36507222016000,
+          "uniquePhysicalDataBytes": 29935922053120,
+          "numFiles": 481920,
+          "numDirectories": 20411
+        }
+      },
+      {
+        "id": 1002,
+        "name": "FileServices",
+        "clusterPartitionId": 3,
+        "stats": {
+          "totalLogicalUsageBytes": 8796093022208,
+          "totalLogicalUsageBytesTimestampUsec": 1789473540000000,
+          "localTotalPhysicalUsageBytes": 4727272931328,
+          "localTotalPhysicalUsageBytesTimestampUsec": 1789473540000000,
+          "cloudTotalPhysicalUsageBytes": 0,
+          "localTierResiliencyImpactBytes": 549755813888,
+          "dataInBytes": 9235897673318,
+          "dataInBytesAfterDedup": 7563636690124,
+          "dataWrittenBytes": 4727272931328,
+          "uniquePhysicalDataBytes": 3876363803688,
+          "numFiles": 481920,
+          "numDirectories": 20411
+        }
+      },
+      {
+        "id": 1003,
+        "name": "LongTermArchive",
+        "clusterPartitionId": 3,
+        "stats": {
+          "totalLogicalUsageBytes": 43980465111040,
+          "totalLogicalUsageBytesTimestampUsec": 1789473540000000,
+          "localTotalPhysicalUsageBytes": 6597069766656,
+          "localTotalPhysicalUsageBytesTimestampUsec": 1789473540000000,
+          "cloudTotalPhysicalUsageBytes": 0,
+          "localTierResiliencyImpactBytes": 824633720832,
+          "dataInBytes": 46179488366592,
+          "dataInBytesAfterDedup": 10555311626649,
+          "dataWrittenBytes": 6597069766656,
+          "uniquePhysicalDataBytes": 5409597208657,
+          "numFiles": 481920,
+          "numDirectories": 20411
+        }
+      }
+    ]
+  }
+}

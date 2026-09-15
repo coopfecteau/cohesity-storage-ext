@@ -1,0 +1,59 @@
+name: custom:cohesity.storage
+version: 0.0.1
+# Floor settled by ticket 03 against the release-tagged schema repo, not guessed. The binding
+# constraint is documents.screens (1.341); openpipeline smartscape lands earlier, at 1.330.
+minDynatraceVersion: "1.341.0"
+# Python 3.14 is an ActiveGate constraint, so it belongs here rather than in
+# minDynatraceVersion. The schema marks this key "Experimental"; Dynatrace's own Palo Alto
+# extension sets it anyway.
+minEECVersion: 1.333.0
+author:
+  name: Cooper Fecteau
+
+python:
+  runtime:
+    module: cohesity_storage
+    version:
+      # 3.14 only. ActiveGate 1.347 stopped shipping the 3.10 interpreter and began rolling
+      # out 2026-09-08, five weeks ahead of 3.10's nominal EOL, so 3.10 builds already fail.
+      min: "3.14"
+
+  # Remote only: Cohesity is an appliance and no OneAgent can run on it, so there is no local
+  # host to activate from. Same reasoning as custom:ssh.command.logs and as the Dell Isilon
+  # vendor extension, which is the closest precedent.
+  activation:
+    remote:
+      path: activationSchema.json
+
+  # Feature sets gate what the EEC ingests. The activation schema carries a matching set of
+  # per-cluster toggles that gate what the extension *fetches* - see collectStorageDomains
+  # and friends there. Both exist on purpose: turning a feature set off here stops the
+  # metric at the EEC, turning the toggle off stops the REST calls that produce it.
+  # "default" is always enabled and cannot be switched off, which is why self-monitoring
+  # lives in it.
+  featureSets:
+    - featureSet: default
+      metrics:
+        - key: cohesity.cluster.collection_success
+    - featureSet: cluster
+      metrics:
+        - key: cohesity.cluster.total_capacity_bytes
+    # SEAM (ticket 04): storage_domain, node and protection_group feature sets land here
+    # once the metric list is settled. Keep one feature set per entity type - a feature set
+    # that spans entities cannot be disabled without losing part of another entity's data.
+
+# Metric-key PREFIX is what binds a metric to a topology entity later
+# (condition: $prefix(cohesity.storage_domain)), so the prefix of every key below is the
+# entity it will hang off, never just a readable grouping. Adding a key under a prefix is
+# therefore a topology decision, not only a naming one.
+metrics:
+  - key: cohesity.cluster.total_capacity_bytes
+    metadata:
+      displayName: Cohesity cluster total capacity
+      description: Raw physical capacity of the cluster as reported by the cluster stats endpoint
+      unit: Byte
+  - key: cohesity.cluster.collection_success
+    metadata:
+      displayName: Cohesity collection success
+      description: 1 when the cluster API answered this interval, otherwise 0
+      unit: Count

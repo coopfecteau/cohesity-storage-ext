@@ -1,0 +1,158 @@
+{
+  "_fixture": {
+    "provenance": "synthetic",
+    "description": "Cluster read/write IOPS and latency. Four metrics batched into one comma-joined metricNames call.",
+    "source": "https://developers.cohesity.com/v1-cluster-7.4/reference/gettimeseriesstats.md",
+    "capturedAt": null,
+    "clusterVersion": "7.4",
+    "warning": "SYNTHETIC. Hand-written from the published response schema, never seen on a cluster. Field names are doc-derived; every value is invented. Do not read anything into the numbers."
+  },
+  "body": {
+    "timeSeriesStats": [
+      {
+        "metricName": "kReadIos",
+        "type": "kInt64",
+        "dataPoints": [
+          {
+            "timestampMsecs": 1789472700000,
+            "int64Value": 4211,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789472880000,
+            "int64Value": 3980,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473060000,
+            "int64Value": 4502,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473240000,
+            "int64Value": 4713,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473420000,
+            "int64Value": 4388,
+            "doubleValue": null,
+            "stringValue": null
+          }
+        ]
+      },
+      {
+        "metricName": "kWriteIos",
+        "type": "kInt64",
+        "dataPoints": [
+          {
+            "timestampMsecs": 1789472700000,
+            "int64Value": 1822,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789472880000,
+            "int64Value": 1901,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473060000,
+            "int64Value": 2044,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473240000,
+            "int64Value": 1977,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473420000,
+            "int64Value": 2130,
+            "doubleValue": null,
+            "stringValue": null
+          }
+        ]
+      },
+      {
+        "metricName": "kReadLatencyUsecs",
+        "type": "kInt64",
+        "dataPoints": [
+          {
+            "timestampMsecs": 1789472700000,
+            "int64Value": 812,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789472880000,
+            "int64Value": 799,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473060000,
+            "int64Value": 903,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473240000,
+            "int64Value": 1044,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473420000,
+            "int64Value": 871,
+            "doubleValue": null,
+            "stringValue": null
+          }
+        ]
+      },
+      {
+        "metricName": "kWriteLatencyUsecs",
+        "type": "kInt64",
+        "dataPoints": [
+          {
+            "timestampMsecs": 1789472700000,
+            "int64Value": 1503,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789472880000,
+            "int64Value": 1622,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473060000,
+            "int64Value": 1488,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473240000,
+            "int64Value": 1710,
+            "doubleValue": null,
+            "stringValue": null
+          },
+          {
+            "timestampMsecs": 1789473420000,
+            "int64Value": 1596,
+            "doubleValue": null,
+            "stringValue": null
+          }
+        ]
+      }
+    ]
+  }
+}
