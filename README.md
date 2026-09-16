@@ -210,6 +210,88 @@ Four things here are load-bearing and each cost somebody a round trip to a tenan
   domain to the default. Those metrics instead feed an `extractNode: false` rule, which computes
   the domain's node id for the edge without creating a node.
 
+## Cohesity permissions
+
+What to ask a cluster owner for. Everything the extension does is **read-only** — it never
+writes to Cohesity.
+
+### Cluster credentials, not Helios
+
+Ask for a credential on the **cluster itself**, not Helios. Helios has its own separate RBAC
+layer, and whether a Helios API key plus `accessClusterId` authorises against cluster or Helios
+privileges is not documented. That is an unknown worth keeping out of an evaluation.
+
+A practical consequence: the **API Keys page is reachable only by logging in to the cluster UI
+directly**. It is not available through Helios. Sites that administer everything through Helios
+are usually surprised by this.
+
+### An API key, minted under a dedicated service user
+
+The extension authenticates with a cluster API key sent as the `apiKey` header — see
+[Why an API key, not a username and password](#why-an-api-key-not-a-username-and-password) for
+the reasoning.
+
+Cohesity API keys carry **no privileges of their own**. `POST /users/{userSid}/api-keys` mints a
+key against a user, and it inherits that user's role. So the role is granted to the *user*, and
+the key should belong to a **dedicated service user** rather than to someone's personal account —
+otherwise the extension's access silently tracks that person's, and dies when they leave.
+
+### The role
+
+**Ask for the built-in `COHESITY_VIEWER` role first.** It is Cohesity's read-only role and is
+very likely sufficient.
+
+> Caveat worth stating honestly: Viewer's exact privilege set could not be verified from public
+> documentation — Cohesity's role reference sits behind a login wall. Sufficient is probable,
+> not certain.
+
+If a security team prefers to grant exactly what is used, a custom role with these seven
+privileges is provably enough:
+
+| privilege | why it is needed |
+|---|---|
+| `CLUSTER_VIEW` | cluster identity, capacity, nodes, disks |
+| `TENANT_VIEW` | required by the time-series endpoint |
+| `STORAGE_DOMAIN_VIEW` | storage domain inventory and usage |
+| `STORAGE_VIEW` | views and file-services throughput |
+| `PROTECTION_VIEW` | protection groups and their runs |
+| `PROTECTION_POLICY_VIEW` | protection policies |
+| `ALERT_VIEW` | cluster alerts |
+
+The ask is driven almost entirely by one endpoint. `/v2/stats/time-series-stats` — the source of
+most of the metric set — requires the **first five at once**. Every other endpoint needs a subset:
+`/v2/stats/cluster-storage`, `/v2/nodes` and `/v2/disks/local` need only `CLUSTER_VIEW`;
+`/v2/storage-domains` needs `STORAGE_DOMAIN_VIEW`; `/v2/file-services/views` needs `STORAGE_VIEW`;
+protection groups and runs need `PROTECTION_VIEW`.
+
+### Before asking for anything
+
+`GET /public/basicClusterInfo` requires **no privileges and no authentication**. Use it to confirm
+the ActiveGate can reach the cluster's management IP before any credential exists — it separates a
+networking problem from a permissions problem, and those get confused constantly.
+
+### Three traps
+
+**The API Keys page is hidden by default.** It does not appear in the cluster UI until
+`apiKeysEnabled` is toggled at `https://<cluster>/feature-flags`. This is the most common reason a
+request comes back with "there is no API Keys page".
+
+**`GET /v2/data-protect/sources` is documented as `Unknown Privileges`.** Cohesity never filled the
+field in, so no privilege can be requested for it specifically. It is the most likely source of an
+unexpected 403. Each collection runs in its own error boundary, so losing protection sources does
+not cost the capacity or protection-run metrics.
+
+**Never request protection-source *refresh*.** It needs `PROTECTION_SOURCE_REFRESH`, a
+modify-class privilege. Including it turns a read-only access request into a write one, which can
+get the whole request refused on principle. The extension does not call it.
+
+### Checking any endpoint not listed here
+
+`https://developers.cohesity.com/v1-cluster-7.4/llms.txt` carries the required privilege inline for
+roughly 600 endpoints. Two traps in that source: the `v1-cluster-7.x` documentation sets actually
+describe the **V2** API, and privilege annotations exist only from **7.3 onward** — 6.8, 7.1 and 7.2
+strip them out.
+
 ## Configure a cluster
 
 One endpoint is one cluster: host, port, API key (inline or from the credential vault — see
