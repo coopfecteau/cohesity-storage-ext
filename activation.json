@@ -14,7 +14,7 @@
       "caCertPath": "/opt/dynatrace/cohesity-ca.pem",
       "fixtureDir": "",
       "collectStorageDomains": true,
-      "collectNodes": true,
+      "collectViews": true,
       "collectProtection": true,
       "intervalMinutes": 5,
       "requestTimeoutSeconds": 30
@@ -38,7 +38,7 @@
         "caCertPath": "",
         "fixtureDir": "",
         "collectStorageDomains": true,
-        "collectNodes": true,
+        "collectViews": true,
         "collectProtection": true,
         "intervalMinutes": 1,
         "requestTimeoutSeconds": 30

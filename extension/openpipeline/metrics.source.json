@@ -1,0 +1,9 @@
+{
+  "displayName": "Cohesity storage",
+  "enabled": true,
+  "sourceType": "extension",
+  "source": "custom:cohesity.storage",
+  "staticRouting": {
+    "pipelineId": "extension:cohesity-storage"
+  }
+}

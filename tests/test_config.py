@@ -48,7 +48,9 @@ class TestDefaults:
     def test_every_optional_collection_is_on_by_default(self):
         config = ClusterConfig.from_dict(raw())
 
-        assert config.enabled_collections == ("storage_domains", "nodes", "protection")
+        # One toggle per feature set in extension.yaml. collectNodes is gone: Node is not a v1
+        # entity, so it switched nothing.
+        assert config.enabled_collections == ("storage_domains", "views", "protection")
 
     def test_explicit_values_win(self):
         config = ClusterConfig.from_dict(
@@ -58,13 +60,13 @@ class TestDefaults:
         assert config.port == 8443
         assert config.interval_minutes == 60
         assert config.request_timeout_seconds == 120
-        assert config.enabled_collections == ("storage_domains", "nodes")
+        assert config.enabled_collections == ("storage_domains", "views")
 
     def test_booleans_survive_the_string_forms_a_hand_written_activation_json_produces(self):
-        config = ClusterConfig.from_dict(raw(verifyTls="false", collectNodes="true"))
+        config = ClusterConfig.from_dict(raw(verifyTls="false", collectViews="true"))
 
         assert config.verify_tls is False
-        assert config.collect_nodes is True
+        assert config.collect_views is True
 
 
 class TestValidation:

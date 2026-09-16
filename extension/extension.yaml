@@ -1,5 +1,5 @@
 name: custom:cohesity.storage
-version: 0.0.1
+version: 0.1.0
 # Floor settled by ticket 03 against the release-tagged schema repo, not guessed. The binding
 # constraint is documents.screens (1.341); openpipeline smartscape lands earlier, at 1.330.
 minDynatraceVersion: "1.341.0"
@@ -25,35 +25,194 @@ python:
     remote:
       path: activationSchema.json
 
-  # Feature sets gate what the EEC ingests. The activation schema carries a matching set of
-  # per-cluster toggles that gate what the extension *fetches* - see collectStorageDomains
-  # and friends there. Both exist on purpose: turning a feature set off here stops the
-  # metric at the EEC, turning the toggle off stops the REST calls that produce it.
-  # "default" is always enabled and cannot be switched off, which is why self-monitoring
-  # lives in it.
+  # ONE collection switch, not two (ticket 06). The per-cluster toggles in
+  # activationSchema.json are the source of truth for what is collected; the feature sets below
+  # mirror them one for one, same names, same scope, and exist only because every metric key
+  # has to belong to one. Leave them all enabled and switch collection per cluster.
+  #
+  # Two switches that can disagree produce "metric missing, both switches look fine", which is
+  # a support call nobody can answer - so if you add a feature set here, add the matching
+  # toggle there in the same commit, and vice versa.
+  #
+  # Cluster metrics sit in "default" on purpose. "default" cannot be switched off, and cluster
+  # metrics are not optional: they carry the cluster id and name that every other entity's
+  # dimensions are namespaced against, and collection_success is the only signal separating
+  # "Cohesity is healthy" from "the extension is broken".
   featureSets:
     - featureSet: default
       metrics:
         - key: cohesity.cluster.collection_success
-    - featureSet: cluster
+        - key: cohesity.cluster.capacity.total
+        - key: cohesity.cluster.capacity.used
+        - key: cohesity.cluster.capacity.available
+        - key: cohesity.cluster.usage.logical
+        - key: cohesity.cluster.usage.physical
+        - key: cohesity.cluster.cpu.usage
+        - key: cohesity.cluster.memory.usage
+        - key: cohesity.cluster.io.iops
+        - key: cohesity.cluster.io.latency
+        - key: cohesity.cluster.garbage.bytes
+    # Mirrors collectStorageDomains.
+    - featureSet: storage_domains
       metrics:
-        - key: cohesity.cluster.total_capacity_bytes
-    # SEAM (ticket 04): storage_domain, node and protection_group feature sets land here
-    # once the metric list is settled. Keep one feature set per entity type - a feature set
-    # that spans entities cannot be disabled without losing part of another entity's data.
+        - key: cohesity.storagedomain.usage.logical
+        - key: cohesity.storagedomain.usage.physical
+        - key: cohesity.storagedomain.resiliency.bytes
+    # Mirrors collectViews. View is dimensions rather than an entity (ticket 05), so the key
+    # lives under the cluster prefix and binds to the cluster entity.
+    - featureSet: views
+      metrics:
+        - key: cohesity.cluster.view.throughput
+    # Mirrors collectProtection. The most expensive collection on a large estate.
+    - featureSet: protection
+      metrics:
+        - key: cohesity.protectiongroup.run.outcome
+        - key: cohesity.protectiongroup.run.duration
+        - key: cohesity.protectiongroup.run.bytes_written
+        - key: cohesity.protectiongroup.run.bytes_logical
+        - key: cohesity.protectiongroup.run.objects
+        - key: cohesity.protectiongroup.last_success.age
 
-# Metric-key PREFIX is what binds a metric to a topology entity later
-# (condition: $prefix(cohesity.storage_domain)), so the prefix of every key below is the
-# entity it will hang off, never just a readable grouping. Adding a key under a prefix is
-# therefore a topology decision, not only a naming one.
+# Metric-key PREFIX is what binds a metric to its Smartscape entity: the node-extraction rules
+# in openpipeline/metrics.pipeline.json match on `cohesity.cluster.*`,
+# `cohesity.storagedomain.*` and `cohesity.protectiongroup.*`. The prefixes below are therefore
+# topology configuration, not a readable grouping - renaming one detaches every metric under it
+# from its entity, silently. Keep them in step with cohesity_storage/metrics.py, which a test
+# asserts.
 metrics:
-  - key: cohesity.cluster.total_capacity_bytes
+  # -- cluster ------------------------------------------------------------
+  - key: cohesity.cluster.capacity.total
     metadata:
       displayName: Cohesity cluster total capacity
-      description: Raw physical capacity of the cluster as reported by the cluster stats endpoint
+      description: Raw physical capacity of the cluster, before deduplication or compression
+      unit: Byte
+  - key: cohesity.cluster.capacity.used
+    metadata:
+      displayName: Cohesity cluster used capacity
+      description: Physical capacity consumed on local storage across the cluster
+      unit: Byte
+  - key: cohesity.cluster.capacity.available
+    metadata:
+      displayName: Cohesity cluster available capacity
+      description: Physical capacity still free on local storage across the cluster
+      unit: Byte
+  - key: cohesity.cluster.usage.logical
+    metadata:
+      displayName: Cohesity cluster logical usage
+      description: Logical (pre-reduction) bytes stored, split by service - dataprotect or fileservices
+      unit: Byte
+  - key: cohesity.cluster.usage.physical
+    metadata:
+      displayName: Cohesity cluster physical usage
+      description: Physical (post-reduction) bytes stored, split by service - dataprotect or fileservices
+      unit: Byte
+  - key: cohesity.cluster.cpu.usage
+    metadata:
+      displayName: Cohesity cluster CPU usage
+      description: Cluster-wide CPU utilisation, averaged over the rollup interval
+      unit: Percent
+  - key: cohesity.cluster.memory.usage
+    metadata:
+      displayName: Cohesity cluster memory usage
+      description: Cluster-wide memory utilisation, averaged over the rollup interval
+      unit: Percent
+  - key: cohesity.cluster.io.iops
+    metadata:
+      displayName: Cohesity cluster IOPS
+      description: Cluster I/O operations per second, split by operation - read or write
+      unit: Count
+  - key: cohesity.cluster.io.latency
+    metadata:
+      displayName: Cohesity cluster I/O latency
+      # Microseconds, not milliseconds, and deliberately not converted: flash-backed Cohesity
+      # routinely serves sub-millisecond, so dividing by 1000 rounds away the whole signal.
+      description: Cluster I/O latency in microseconds, split by operation - read or write
+      unit: MicroSecond
+  - key: cohesity.cluster.garbage.bytes
+    metadata:
+      displayName: Cohesity cluster garbage
+      description: Bytes held by data awaiting garbage collection, which capacity planning must not count as free
+      unit: Byte
+  - key: cohesity.cluster.view.throughput
+    metadata:
+      displayName: Cohesity view throughput
+      description: Bytes read or written by each of the top views by activity, as a cluster-scoped measurement
       unit: Byte
   - key: cohesity.cluster.collection_success
     metadata:
       displayName: Cohesity collection success
+      # Alert on the ABSENCE of a 1, never on a 0. A pre-identity failure reports under the
+      # configured cluster name rather than the discovered one, so the failure series is a
+      # different series from the success series.
       description: 1 when the cluster API answered this interval, otherwise 0
       unit: Count
+
+  # -- storage domain -----------------------------------------------------
+  - key: cohesity.storagedomain.usage.logical
+    metadata:
+      displayName: Cohesity storage domain logical usage
+      description: Logical (pre-reduction) bytes stored in the storage domain
+      unit: Byte
+  - key: cohesity.storagedomain.usage.physical
+    metadata:
+      displayName: Cohesity storage domain physical usage
+      description: Physical (post-reduction) bytes stored on local tiers of the storage domain
+      unit: Byte
+  - key: cohesity.storagedomain.resiliency.bytes
+    metadata:
+      displayName: Cohesity storage domain resiliency overhead
+      description: Bytes consumed by erasure coding or replication in the storage domain's local tier
+      unit: Byte
+
+  # -- protection group ---------------------------------------------------
+  - key: cohesity.protectiongroup.run.outcome
+    metadata:
+      displayName: Cohesity protection run outcome
+      # A delta counter of newly-completed runs, dimensioned by terminal status - not a 0/1
+      # gauge. A gauge would keep asserting the last outcome long after the run ended and would
+      # make two failures in one interval indistinguishable from one.
+      description: Count of protection runs that reached a terminal status this interval, split by status
+      unit: Count
+  - key: cohesity.protectiongroup.run.duration
+    metadata:
+      displayName: Cohesity protection run duration
+      description: Wall-clock time from start to end of a completed protection run
+      unit: MilliSecond
+  - key: cohesity.protectiongroup.run.bytes_written
+    metadata:
+      displayName: Cohesity protection run bytes written
+      description: Physical bytes written to the cluster by a completed protection run
+      unit: Byte
+  - key: cohesity.protectiongroup.run.bytes_logical
+    metadata:
+      displayName: Cohesity protection run logical bytes
+      description: Logical size of the data a completed protection run protected, before reduction
+      unit: Byte
+  - key: cohesity.protectiongroup.run.objects
+    metadata:
+      displayName: Cohesity protection run objects
+      description: Objects in a completed protection run, split by result - success or total
+      unit: Count
+  - key: cohesity.protectiongroup.last_success.age
+    metadata:
+      displayName: Cohesity time since last successful run
+      # The half of the contract that carries silence. A counter cannot report the run that
+      # never started; this gauge is defined at every instant, and isPaused tells a deliberate
+      # pause apart from a broken schedule.
+      description: Time since this protection group last finished successfully
+      unit: MilliSecond
+
+# Smartscape entities come from OpenPipeline, NOT from a classic `topology:` section - that
+# path is deprecated since 1.334, and on Gen3 there is no REST entity-creation API either, so
+# node and edge extraction off the metric stream is the mechanism. Node types must carry an
+# EXT_ (or CUSTOM_) prefix: bare COHESITY_* is rejected server-side by a rule the published
+# settings schema never mentions. See ticket 02.
+openpipeline:
+  sources:
+    - displayName: Cohesity storage
+      sourcePath: openpipeline/metrics.source.json
+      configScope: metrics
+  pipelines:
+    - displayName: Cohesity storage
+      pipelinePath: openpipeline/metrics.pipeline.json
+      configScope: metrics

@@ -4,19 +4,23 @@ The SDK calls :meth:`ExtensionImpl.query` once a minute. Each cluster carries it
 interval, so query decides which are due; cluster capacity moves slowly and every poll costs
 Cohesity API calls.
 
-What this file is *not* is the metric set. Ticket 07 built the client - every endpoint the v1
-design needs, parsed into domain objects - and deliberately stopped short of naming metric keys,
-units and dimensions, which is ticket 06's decision and is still open. So the poll below fetches
-everything and reports only the two keys the scaffold already declared, logging a one-line
-summary of the rest. Wiring those into `report_metric` is the seam, and it is a small one: the
-data is already parsed and already namespaced.
+What this file is *not* is the metric contract. Keys, units and dimensions live in
+:mod:`.metrics`, which turns parsed domain objects into :class:`~.metrics.Sample` records with
+no SDK import anywhere in the path. This module only decides *when* to call and hands the
+result to ``report_metric``. That split is why the whole mapping can be tested against the
+shipped fixtures without an EEC or a tenant.
+
+Collection is switched in exactly one place: the per-cluster toggles in the activation schema.
+The feature sets in extension.yaml mirror them one for one and are not a second, independent
+gate - two switches that can disagree produce "metric missing, both switches look fine", which
+is a support call nobody can answer.
 """
 
 from __future__ import annotations
 
 import time
 
-from dynatrace_extension import Extension, Status, StatusValue
+from dynatrace_extension import Extension, MetricType, Status, StatusValue
 
 from . import metrics
 from .client import CLUSTER_STATS_CALLS, VIEW_METRICS, CohesityClient
@@ -89,6 +93,7 @@ class ExtensionImpl(Extension):
             f"{config.name}: {client.describe()} answered as cluster {status.cluster_id} "
             f"('{status.name}') running {status.software_version or 'an unreported version'}; "
             f"view stats will be read from {client.views_path()}; "
+            f"collecting {', '.join(config.enabled_collections) or 'cluster metrics only'}; "
             # Which auth mode actually took effect, stated once at fastcheck. In vault mode this
             # is also the only place the injected field name is ever visible - it is not in the
             # schema and it is not in the UI, so a log line is where it has to be observed.
@@ -104,7 +109,6 @@ class ExtensionImpl(Extension):
         client = self._client_for(config)
         try:
             status = client.cluster_status()
-            storage = client.cluster_storage()
         except CohesityError as exception:
             self.logger.error(str(exception))
             self._report_failure(config)
@@ -114,82 +118,117 @@ class ExtensionImpl(Extension):
             self._report_failure(config)
             return
 
-        dimensions = metrics.cluster_dimensions(status.cluster_id, status.name or config.name)
-        self.report_metric(metrics.CLUSTER_COLLECTION_SUCCESS, 1, dimensions=dimensions)
+        cluster_id = status.cluster_id
+        cluster_name = status.name or config.name
+        self.report_metric(
+            metrics.CLUSTER_COLLECTION_SUCCESS,
+            1,
+            dimensions=metrics.cluster_dimensions(cluster_id, cluster_name),
+        )
 
-        if storage.total_capacity_bytes is None:
-            self.logger.warning(
-                f"{config.name}: /v2/stats/cluster-storage carried no totalCapacityBytes. Every "
-                f"field in that response is nullable; reporting zero would read as an outage."
-            )
-        else:
-            self.report_metric(
-                metrics.CLUSTER_TOTAL_CAPACITY_BYTES,
-                storage.total_capacity_bytes,
-                dimensions=dimensions,
-            )
-
-        self._collect_rest(config, client)
+        # Each section is independent: a storage domain call that 403s must not cost the
+        # capacity numbers that already arrived, and one silent collection is worth a log line
+        # rather than a lost poll. collection_success stays 1 because the cluster did answer.
+        #
+        # The first two have no toggle because they are not optional - they carry the cluster
+        # identity every other entity is namespaced against. The last three are switched by the
+        # activation toggles, which are the only collection switch there is.
+        sections = [
+            ("cluster capacity", self._report_cluster_storage, True),
+            ("cluster time series", self._report_cluster_series, True),
+            ("storage domains", self._report_storage_domains, config.collect_storage_domains),
+            ("views", self._report_views, config.collect_views),
+            ("protection", self._report_protection, config.collect_protection),
+        ]
+        for label, collect, enabled in sections:
+            if enabled:
+                self._section(config, label, collect, client, cluster_id, cluster_name)
 
         for caveat in client.caveats():
             # Logged every poll, not once. A synthetic fixture is most dangerous to whoever
             # reads the logs six weeks from now without having been told.
             self.logger.warning(caveat)
 
-    def _collect_rest(self, config: ClusterConfig, client: CohesityClient) -> None:
-        """Fetch everything else and log what came back.
-
-        SEAM (ticket 06). Each block below already holds parsed, namespaced data; what is
-        missing is only the metric key, unit and dimension contract. Fetching it now rather than
-        waiting keeps the API cost, the call shapes and the parsing honest - a seam nobody
-        exercises is a seam that does not fit when the time comes.
-
-        Note ``config.collect_nodes`` is not consulted anywhere: ticket 04's metric set has no
-        node metrics and ticket 05 kept EXT_COHESITY_NODE out of v1, so the toggle currently
-        switches nothing. It is left in the schema rather than removed because removing a
-        configuration property is a migration; ticket 09 should decide which way it goes.
-        """
+    def _section(self, config: ClusterConfig, label: str, collect, *args) -> None:
         try:
-            for call in CLUSTER_STATS_CALLS:
-                series = client.cluster_time_series(call)
-                empty = [name for name, metric in series.items() if metric.latest() is None]
-                if len(empty) == len(series) and series:
-                    # All-empty with no error is the signature of a wrong entityId, which is
-                    # ticket 04's biggest open risk. It is silent unless something says this.
-                    self.logger.warning(
-                        f"{config.name}: {call['schemaName']} returned no data points for "
-                        f"entityId {client.cluster_status().stats_entity_id}. The assumption "
-                        f"that ClusterStatus.clusterId is the stats entity id may be wrong - "
-                        f"this failure mode returns empty rather than an error."
-                    )
-
-            if config.collect_storage_domains:
-                cluster_id = client.cluster_status().cluster_id
-                domains = client.storage_domains()
-                named = ", ".join(f"{d.name}={d.entity_id(cluster_id)}" for d in domains)
-                self.logger.info(f"{config.name}: {len(domains)} storage domain(s): {named}")
-
-            # Views have no collection toggle of their own. They are a cluster-level ranking of
-            # file-services activity, not a per-storage-domain reading, so hanging them off the
-            # storage-domain switch would be arbitrary. Ticket 09 owns the activation schema and
-            # should decide whether they get their own switch; two calls is not worth one today.
-            for metric_name in VIEW_METRICS:
-                views = client.view_stats(metric_name)
-                self.logger.info(f"{config.name}: {len(views)} view(s) ranked by {metric_name}")
-
-            if config.collect_protection:
-                groups = client.protection_groups()
-                runs = client.new_protection_runs()
-                self.logger.info(
-                    f"{config.name}: {len(groups)} protection group(s); {len(runs)} newly "
-                    f"finished run(s) this interval "
-                    f"({', '.join(f'{run.protection_group_name}:{run.status}' for run in runs) or 'none'}); "
-                    f"{client.counted_run_ids} run id(s) held against double counting"
-                )
+            collect(*args)
         except CohesityError as exception:
-            # Not a total failure: capacity was already reported above, and collection_success
-            # stays 1 because the cluster did answer. Losing one collection is worth saying so.
-            self.logger.error(str(exception))
+            self.logger.error(f"{config.name}: {label} collection failed - {exception}")
+        except Exception:
+            self.logger.exception(f"{config.name}: unexpected failure collecting {label}")
+
+    def _report(self, samples: list[metrics.Sample]) -> None:
+        for sample in samples:
+            self.report_metric(
+                sample.key,
+                sample.value,
+                dimensions=sample.dimensions,
+                # Run outcomes are events being counted, not a state being read. A gauge would
+                # keep asserting the last run's status until the next one, and would make two
+                # failures in one interval indistinguishable from one.
+                metric_type=MetricType.DELTA if sample.delta else MetricType.GAUGE,
+            )
+
+    def _report_cluster_storage(self, client: CohesityClient, cluster_id: str, cluster_name: str) -> None:
+        storage = client.cluster_storage()
+        samples = metrics.cluster_storage_samples(cluster_id, cluster_name, storage)
+        if not samples:
+            # Every field in this response is nullable, so an all-null body is possible and
+            # says nothing on its own. Reporting zeros instead would read as an outage.
+            self.logger.warning(
+                f"{cluster_name}: /v2/stats/cluster-storage carried no usable numbers - every "
+                f"field in that response is nullable, so no capacity metric was reported"
+            )
+        self._report(samples)
+
+    def _report_cluster_series(self, client: CohesityClient, cluster_id: str, cluster_name: str) -> None:
+        for call in CLUSTER_STATS_CALLS:
+            series = client.cluster_time_series(call)
+            samples = metrics.cluster_time_series_samples(
+                cluster_id, cluster_name, call["schemaName"], series
+            )
+            if series and not samples:
+                # All-empty with no error is the signature of a wrong entityId, which is ticket
+                # 04's biggest open risk. It is silent unless something says this.
+                self.logger.warning(
+                    f"{cluster_name}: {call['schemaName']} returned no data points for entityId "
+                    f"{client.cluster_status().stats_entity_id}. The assumption that "
+                    f"ClusterStatus.clusterId is the stats entity id may be wrong - this failure "
+                    f"mode returns empty rather than an error"
+                )
+            self._report(samples)
+
+    def _report_storage_domains(self, client: CohesityClient, cluster_id: str, cluster_name: str) -> None:
+        domains = client.storage_domains()
+        self._report(metrics.storage_domain_samples(cluster_id, cluster_name, domains))
+        self.logger.info(f"{cluster_name}: reported {len(domains)} storage domain(s)")
+
+    def _report_views(self, client: CohesityClient, cluster_id: str, cluster_name: str) -> None:
+        for view_metric in VIEW_METRICS:
+            views = client.view_stats(view_metric)
+            self._report(metrics.view_samples(cluster_id, cluster_name, view_metric, views))
+
+    def _report_protection(self, client: CohesityClient, cluster_id: str, cluster_name: str) -> None:
+        """Groups first, then runs - the runs endpoint does not return the storage domain.
+
+        Fetching groups is what supplies ``cohesity.storagedomain.id`` on run metrics, and that
+        dimension is the whole ``writes_to`` edge. It also supplies isPaused/isActive, which the
+        runs summary omits.
+        """
+        groups = client.protection_groups()
+        now_usecs = int(time.time() * 1_000_000)
+        self._report(metrics.protection_group_samples(cluster_id, cluster_name, groups, now_usecs))
+
+        # Deduplicated on run.id by the client's ledger. Counting what protection_runs()
+        # returns directly would inflate every failure by the window-to-interval ratio.
+        runs = client.new_protection_runs()
+        self._report(metrics.protection_run_samples(cluster_id, cluster_name, runs, groups))
+        self.logger.info(
+            f"{cluster_name}: {len(groups)} protection group(s); {len(runs)} newly finished "
+            f"run(s) this interval "
+            f"({', '.join(f'{run.protection_group_name}:{run.status}' for run in runs) or 'none'}); "
+            f"{client.counted_run_ids} run id(s) held against double counting"
+        )
 
     def _report_failure(self, config: ClusterConfig) -> None:
         """Report the miss so an alert on collection_success fires instead of going silent.

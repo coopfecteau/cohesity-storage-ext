@@ -17,18 +17,20 @@ ActiveGate ──https + apiKey──▶ Cohesity cluster ──REST──▶ me
 | Floors | `minDynatraceVersion 1.341.0`, `minEECVersion 1.333.0` (ActiveGate 1.333+) |
 | Needs on the cluster | A cluster API key. No agent — Cohesity is an appliance. |
 
-## Status: client complete, metric set pending
+## Status: v0.1.0 — full metric set and Smartscape topology
 
-The Cohesity client is done (ticket 07): one method per endpoint the v1 design needs, every
-response parsed into domain objects, and a replay mode that serves the same interface from
-recorded JSON. What it still reports to Grail is the scaffold's two keys — the metric key,
-unit and dimension contract is ticket 06's decision and is still open.
+21 metric keys across three entity prefixes, and three Smartscape node types with three edges,
+all derived from the metric stream by OpenPipeline. Nothing has yet run against a real Cohesity
+cluster; every number below has only ever come from a synthetic fixture.
 
-| Seam | Lives in | Arrives with |
-|---|---|---|
-| Metric keys, units and dimensions | `cohesity_storage/metrics.py`, `extension/extension.yaml` | ticket 06 |
-| Wiring parsed data into `report_metric` | `ExtensionImpl._collect_rest` | ticket 09 |
-| Topology (entity types and relationships) | `extension/extension.yaml` | ticket 02 |
+| Piece | Lives in |
+|---|---|
+| Metric keys, units and dimensions | `cohesity_storage/metrics.py`, `extension/extension.yaml` |
+| Parsed data to `report_metric` | `ExtensionImpl._poll` and the `_report_*` methods |
+| Entity types and relationships | `extension/openpipeline/metrics.pipeline.json` |
+
+Still open: dashboards, alerting, and the fact that the run-dedup ledger is in memory, so an
+ActiveGate restart re-counts recently completed protection runs.
 
 **Every fixture in `fixtures/` is synthetic.** They were hand-written from Cohesity's published
 6.8–7.4 response schemas; no cluster has been reached. They prove the code parses the documented
@@ -129,21 +131,84 @@ whitespace inside it, is refused.
 
 ## Metric and dimension conventions
 
-Keys are `cohesity.<entity>.<measure>` — for example `cohesity.cluster.total_capacity_bytes`,
-`cohesity.storage_domain.usage_physical_bytes`.
+Keys are `cohesity.<entity>.<measure>` — for example `cohesity.cluster.capacity.total`,
+`cohesity.storagedomain.usage.physical`.
 
-That is not a readability choice. A metric binds to a topology entity by its key **prefix**
-(`condition: $prefix(cohesity.node)`), so the prefix of a key decides which entity the metric
-will hang off. One prefix per entity type, and no prefix may be a prefix of another — there
-is a test for it.
+That is not a readability choice. A metric binds to a Smartscape entity by its key **prefix**:
+the node-extraction rules in `extension/openpipeline/metrics.pipeline.json` match
+`cohesity.cluster.*`, `cohesity.storagedomain.*` and `cohesity.protectiongroup.*`. One prefix
+per entity type, no prefix may be a prefix of another, and the prefixes carry no underscore
+because the rules say they carry no underscore. There are tests for all three.
 
-Everything that discriminates goes in dimensions: `cohesity.cluster.id`,
-`cohesity.cluster.name`, `cohesity.storage_domain.id`, `cohesity.node.id`,
-`cohesity.protection_group.id`.
+| prefix | entity |
+|---|---|
+| `cohesity.cluster` | `EXT_COHESITY_CLUSTER` |
+| `cohesity.storagedomain` | `EXT_COHESITY_STORAGE_DOMAIN` |
+| `cohesity.protectiongroup` | `EXT_COHESITY_PROTECTION_GROUP` |
+
+Everything that discriminates goes in dimensions. Identity dimensions stay `cohesity.*`-prefixed
+so they cannot collide with a built-in field: `cohesity.cluster.id`, `cohesity.cluster.name`,
+`cohesity.storagedomain.id`, `cohesity.storagedomain.name`, `cohesity.protectiongroup.id`,
+`cohesity.protectiongroup.name`, `cohesity.view.id`, `cohesity.view.name`. The descriptive ones
+are bare, because they carry no identity and no rule reads them: `service`, `operation`,
+`status`, `result`, plus Cohesity's own `isSlaViolated`, `isPaused` and `isActive`.
+
+**View is dimensions, not an entity.** The poll is a top-20 ranking, and a sampled population
+makes an unstable entity set, so view throughput reports as `cohesity.cluster.view.throughput`
+and binds to the cluster. Adding view dimensions does not fragment the cluster entity — identity
+comes from `idComponents`, which for the cluster is the cluster id alone.
+
+**Protection runs are a counter, not a status gauge.** `cohesity.protectiongroup.run.outcome` is
+a delta counter of newly completed runs dimensioned by terminal `status`, deduplicated on
+`run.id`; `cohesity.protectiongroup.last_success.age` is the gauge that sees the run which never
+happened. A counter for what happened, an age gauge for what did not.
 
 Cohesity object ids are cluster-scoped int64s and **will** collide across clusters, so every
 id below cluster level is namespaced `{clusterId}_{objectId}` — from day one, even though v1
 monitors a single cluster. `metrics.entity_id()` is the only place that formatting lives.
+
+## Entities in Smartscape
+
+Three node types, three edges, all derived from the metric stream by OpenPipeline — **not** by a
+classic `topology:` section, which is deprecated since 1.334. On Gen3 there is no REST
+entity-creation API either, so extraction off the metric stream is the mechanism.
+
+| node type | id components | named from |
+|---|---|---|
+| `EXT_COHESITY_CLUSTER` | `cluster_id` | `cohesity.cluster.name` |
+| `EXT_COHESITY_STORAGE_DOMAIN` | `cluster_id`, `storagedomain_id` | `cohesity.storagedomain.name` |
+| `EXT_COHESITY_PROTECTION_GROUP` | `cluster_id`, `protectiongroup_id` | `cohesity.protectiongroup.name` |
+
+```
+EXT_COHESITY_CLUSTER ──contains──▶ EXT_COHESITY_STORAGE_DOMAIN
+                     ──contains──▶ EXT_COHESITY_PROTECTION_GROUP
+                                       │
+                                  writes_to
+                                       ▼
+                          EXT_COHESITY_STORAGE_DOMAIN
+```
+
+`writes_to` is the edge that earns the topology its keep. It crosses the containment tree and
+answers "which backup job is filling this storage domain" — a question a Cohesity admin cannot
+easily answer today. It costs one dimension on six metrics and no extra round trip, because the
+protection-groups response returns `storageDomainId` on the same call that produces the metrics.
+
+Four things here are load-bearing and each cost somebody a round trip to a tenant:
+
+- **The `EXT_` prefix is mandatory.** Bare `COHESITY_CLUSTER` is rejected server-side with
+  `Must start with one of ['CUSTOM_, EXT_']` — a rule the published settings schema never
+  mentions. Edge types are lowercase and at most 32 characters.
+- **Identity is the id, never the name.** Storage domains and protection groups can both be
+  renamed; a name in the identity orphans the entity and silently mints a second one. Ids are
+  namespaced `{clusterId}_{objectId}`, because Cohesity ids are cluster-scoped int64s.
+- **Each rule's matcher guards on its own id dimensions** — what `requiredDimensions` buys in
+  classic topology. A partial poll must not mint a phantom entity. `cohesity.storagedomain.id`
+  is deliberately *not* required by the protection-group rule: a group with no storage domain
+  should still exist, just without the edge.
+- **The storage domain node is only ever named from its own metrics.** Protection-group metrics
+  carry the domain id but not its name, so a second extracting rule there would rename every
+  domain to the default. Those metrics instead feed an `extractNode: false` rule, which computes
+  the domain's node id for the edge without creating a node.
 
 ## Configure a cluster
 
@@ -157,15 +222,22 @@ clusters and exposes the API key to anything that can answer for the cluster add
 Setting a CA path *and* turning verification off is refused, because that configuration reads
 as "we trust this CA" while trusting everything.
 
-**Feature sets.** There are two switches and they do different things:
+**Collection is one switch, not two.** The **Collect …** toggles in the monitoring
+configuration are the source of truth: turning one off skips the REST calls, which is what
+actually saves load on a large estate. The feature sets in `extension.yaml` mirror them one for
+one — `storage_domains`, `views`, `protection`, same names, same scope — and exist only because
+every metric key has to belong to one. Leave them all enabled.
 
-- The feature-set toggles Dynatrace shows (declared in `extension.yaml` under
-  `python.featureSets`) gate what the **EEC ingests**. A metric outside an enabled feature set
-  is dropped after the extension has already fetched it. The `default` feature set is always
-  on and holds the self-monitoring metric.
-- The **Collect …** toggles in the monitoring configuration gate what the extension
-  **fetches**. Turning one off skips the REST calls, which is what actually saves load on a
-  large estate.
+This used to be two independent switches, which could disagree and produce "metric missing,
+both switches look fine". If you add a feature set, add the matching toggle in the same commit;
+a test asserts the two lists match.
+
+Cluster metrics and `cohesity.cluster.collection_success` sit in the always-on `default` feature
+set. They are not optional: they carry the cluster id and name every other entity's dimensions
+are namespaced against, and `collection_success` is the only signal separating "Cohesity is
+healthy" from "the extension is broken". **Alert on the absence of a success, never on a zero** —
+a failure before the cluster identity is known reports under the configured name, which is a
+different series.
 
 ## Build
 
@@ -292,6 +364,9 @@ one works with the other.
 extension/
   extension.yaml          name, version, floors, python runtime, feature sets, metric metadata
   activationSchema.json   the monitoring configuration UI
+  openpipeline/
+    metrics.source.json   routes this extension's metrics to the pipeline below
+    metrics.pipeline.json smartscape node and edge extraction - the entity model
 cohesity_storage/
   __main__.py             scheduling and reporting - the Extension subclass
   config.py               cluster parsing and validation
@@ -300,7 +375,7 @@ cohesity_storage/
   domain.py               response bodies to domain objects; dedup ledger; version parsing
   fixtures.py             recorded responses and their provenance
   errors.py               the failure taxonomy: auth vs TLS vs version vs fixture
-  metrics.py              metric keys, dimensions, id namespacing      (SEAM, ticket 06)
+  metrics.py              metric keys, dimensions, and payload-to-sample mapping
 fixtures/                 13 recorded responses - all SYNTHETIC today
 tests/
   cohesity_fake_cluster.py  the stand-in cluster, used in process by the tests
@@ -309,7 +384,9 @@ tests/
   test_client.py          request shapes, error mapping, replay against the fixtures
   test_fixtures.py        fixture naming and provenance
   test_fake_cluster.py    auth, the 7.3 fork, and one pass over a real socket
-  test_metrics.py         key prefixes and id namespacing
+  test_metrics.py         key prefixes, dimension keys, the ticket 06 contract
+  test_reporting.py       fixture bodies to samples - the whole metric path, no EEC
+  test_manifest.py        extension.yaml, activation schema and pipeline JSON vs the code
 tools/
   local_cohesity_server.py  runnable fake cluster for dt-sdk run
 ```

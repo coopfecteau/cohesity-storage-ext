@@ -150,15 +150,15 @@
         },
         "collectStorageDomains": {
           "displayName": "Collect storage domain metrics",
-          "description": "Per storage domain (view box) capacity and consumption. Turning this off skips the API calls, not just the ingest.",
+          "description": "Per storage domain (view box) capacity and consumption. This is the only switch: the matching extension feature set mirrors it rather than gating separately, so turning this off stops both the API calls and the ingest.",
           "type": "boolean",
           "nullable": false,
           "default": true,
           "maxItems": 1
         },
-        "collectNodes": {
-          "displayName": "Collect node metrics",
-          "description": "Per node capacity and health. Turning this off skips the API calls, not just the ingest.",
+        "collectViews": {
+          "displayName": "Collect view throughput",
+          "description": "Read and write throughput for the top 20 views by activity, carried as dimensions on a cluster metric - views are not entities, because a top-N ranking makes an unstable entity population. Turning this off skips the API calls, not just the ingest.",
           "type": "boolean",
           "nullable": false,
           "default": true,

@@ -67,7 +67,7 @@ DEFAULTS = {
     "useCredentialVault": False,
     "verifyTls": True,
     "collectStorageDomains": True,
-    "collectNodes": True,
+    "collectViews": True,
     "collectProtection": True,
     "intervalMinutes": 5,
     "requestTimeoutSeconds": 30,
@@ -96,8 +96,13 @@ class ClusterConfig:
     api_key_field: str = "apiKey"
     verify_tls: bool = True
     ca_cert_path: str = ""
+    # One toggle per feature set in extension.yaml, same names, same meaning. Ticket 06
+    # collapsed the two independent switches this extension used to have: these are now the
+    # single source of truth for what is collected, and the feature sets mirror them rather
+    # than gate separately. `collectNodes` is gone entirely - Node is not a v1 entity and the
+    # toggle switched nothing, which is worse than no toggle at all.
     collect_storage_domains: bool = True
-    collect_nodes: bool = True
+    collect_views: bool = True
     collect_protection: bool = True
     interval_minutes: int = 5
     request_timeout_seconds: int = 30
@@ -166,7 +171,7 @@ class ClusterConfig:
             verify_tls=_bool(raw, "verifyTls"),
             ca_cert_path=_text(raw, "caCertPath"),
             collect_storage_domains=_bool(raw, "collectStorageDomains"),
-            collect_nodes=_bool(raw, "collectNodes"),
+            collect_views=_bool(raw, "collectViews"),
             collect_protection=_bool(raw, "collectProtection"),
             interval_minutes=_int(raw, "intervalMinutes", label, minimum=1, maximum=1440),
             request_timeout_seconds=_int(raw, "requestTimeoutSeconds", label, minimum=1, maximum=300),
@@ -272,8 +277,8 @@ class ClusterConfig:
         names = []
         if self.collect_storage_domains:
             names.append("storage_domains")
-        if self.collect_nodes:
-            names.append("nodes")
+        if self.collect_views:
+            names.append("views")
         if self.collect_protection:
             names.append("protection")
         return tuple(names)

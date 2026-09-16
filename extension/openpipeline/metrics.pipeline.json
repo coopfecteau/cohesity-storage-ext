@@ -1,0 +1,200 @@
+{
+  "displayName": "Cohesity storage",
+  "customId": "extension:cohesity-storage",
+  "metadataList": [],
+  "processing": {
+    "processors": []
+  },
+  "smartscapeNodeExtraction": {
+    "processors": [
+      {
+        "id": "cohesity-cluster-node",
+        "description": "Cohesity cluster node, upserted from every metric this extension emits. Identity is the cluster id alone, so the view, storage domain and protection group dimensions riding on cluster metrics cannot fragment it.",
+        "type": "smartscapeNode",
+        "enabled": true,
+        "matcher": "isNotNull(cohesity.cluster.id)",
+        "smartscapeNode": {
+          "nodeType": "EXT_COHESITY_CLUSTER",
+          "nodeIdFieldName": "dt.smartscape.cohesity_cluster",
+          "idComponents": [
+            {
+              "idComponent": "cluster_id",
+              "referencedFieldName": "cohesity.cluster.id"
+            }
+          ],
+          "extractNode": true,
+          "nodeName": {
+            "type": "field",
+            "field": {
+              "sourceFieldName": "cohesity.cluster.name",
+              "defaultValue": "Cohesity cluster"
+            }
+          },
+          "fieldsToExtract": [
+            {
+              "fieldName": "cohesity_cluster_id",
+              "referencedFieldName": "cohesity.cluster.id"
+            }
+          ],
+          "staticEdgesToExtract": []
+        }
+      },
+      {
+        "id": "cohesity-storage-domain-node",
+        "description": "Cohesity storage domain node, upserted only from cohesity.storagedomain.* metrics because those are the only ones carrying the domain's name. Protection group metrics also carry the domain id, and upserting from those would rename every domain to the default.",
+        "type": "smartscapeNode",
+        "enabled": true,
+        "matcher": "matchesValue(metric.key, \"cohesity.storagedomain.*\") and isNotNull(cohesity.cluster.id) and isNotNull(cohesity.storagedomain.id)",
+        "smartscapeNode": {
+          "nodeType": "EXT_COHESITY_STORAGE_DOMAIN",
+          "nodeIdFieldName": "dt.smartscape.cohesity_storage_domain",
+          "idComponents": [
+            {
+              "idComponent": "cluster_id",
+              "referencedFieldName": "cohesity.cluster.id"
+            },
+            {
+              "idComponent": "storagedomain_id",
+              "referencedFieldName": "cohesity.storagedomain.id"
+            }
+          ],
+          "extractNode": true,
+          "nodeName": {
+            "type": "field",
+            "field": {
+              "sourceFieldName": "cohesity.storagedomain.name",
+              "defaultValue": "Cohesity storage domain"
+            }
+          },
+          "fieldsToExtract": [
+            {
+              "fieldName": "cohesity_cluster_id",
+              "referencedFieldName": "cohesity.cluster.id"
+            },
+            {
+              "fieldName": "cohesity_storagedomain_id",
+              "referencedFieldName": "cohesity.storagedomain.id"
+            }
+          ],
+          "staticEdgesToExtract": []
+        }
+      },
+      {
+        "id": "cohesity-protection-group-node",
+        "description": "Cohesity protection group node. The storage domain id is deliberately NOT required: a protection group with no storage domain must still exist as an entity, just without the writes_to edge.",
+        "type": "smartscapeNode",
+        "enabled": true,
+        "matcher": "matchesValue(metric.key, \"cohesity.protectiongroup.*\") and isNotNull(cohesity.cluster.id) and isNotNull(cohesity.protectiongroup.id)",
+        "smartscapeNode": {
+          "nodeType": "EXT_COHESITY_PROTECTION_GROUP",
+          "nodeIdFieldName": "dt.smartscape.cohesity_protection_group",
+          "idComponents": [
+            {
+              "idComponent": "cluster_id",
+              "referencedFieldName": "cohesity.cluster.id"
+            },
+            {
+              "idComponent": "protectiongroup_id",
+              "referencedFieldName": "cohesity.protectiongroup.id"
+            }
+          ],
+          "extractNode": true,
+          "nodeName": {
+            "type": "field",
+            "field": {
+              "sourceFieldName": "cohesity.protectiongroup.name",
+              "defaultValue": "Cohesity protection group"
+            }
+          },
+          "fieldsToExtract": [
+            {
+              "fieldName": "cohesity_cluster_id",
+              "referencedFieldName": "cohesity.cluster.id"
+            },
+            {
+              "fieldName": "cohesity_storagedomain_id",
+              "referencedFieldName": "cohesity.storagedomain.id"
+            },
+            {
+              "fieldName": "paused",
+              "referencedFieldName": "isPaused"
+            },
+            {
+              "fieldName": "active",
+              "referencedFieldName": "isActive"
+            }
+          ],
+          "staticEdgesToExtract": []
+        }
+      },
+      {
+        "id": "cohesity-storage-domain-id-on-protection-metrics",
+        "description": "Resolves the storage domain node id from a protection group metric WITHOUT creating a node. extractNode is false because the domain's own metrics already own that entity; this only computes the id the writes_to edge needs as a target.",
+        "type": "smartscapeNode",
+        "enabled": true,
+        "matcher": "matchesValue(metric.key, \"cohesity.protectiongroup.*\") and isNotNull(cohesity.cluster.id) and isNotNull(cohesity.storagedomain.id)",
+        "smartscapeNode": {
+          "nodeType": "EXT_COHESITY_STORAGE_DOMAIN",
+          "nodeIdFieldName": "dt.smartscape.cohesity_storage_domain",
+          "idComponents": [
+            {
+              "idComponent": "cluster_id",
+              "referencedFieldName": "cohesity.cluster.id"
+            },
+            {
+              "idComponent": "storagedomain_id",
+              "referencedFieldName": "cohesity.storagedomain.id"
+            }
+          ],
+          "extractNode": false
+        }
+      }
+    ]
+  },
+  "smartscapeEdgeExtraction": {
+    "processors": [
+      {
+        "id": "cohesity-cluster-contains-storage-domain",
+        "description": "Containment: a storage domain lives on exactly one cluster. Drawn from the storage domain's own metrics, where both node ids are resolved.",
+        "type": "smartscapeEdge",
+        "enabled": true,
+        "matcher": "matchesValue(metric.key, \"cohesity.storagedomain.*\") and isNotNull(cohesity.cluster.id) and isNotNull(cohesity.storagedomain.id)",
+        "smartscapeEdge": {
+          "sourceType": "EXT_COHESITY_CLUSTER",
+          "sourceIdFieldName": "dt.smartscape.cohesity_cluster",
+          "edgeType": "contains",
+          "targetType": "EXT_COHESITY_STORAGE_DOMAIN",
+          "targetIdFieldName": "dt.smartscape.cohesity_storage_domain"
+        }
+      },
+      {
+        "id": "cohesity-cluster-contains-protection-group",
+        "description": "Containment: a protection group is defined on exactly one cluster.",
+        "type": "smartscapeEdge",
+        "enabled": true,
+        "matcher": "matchesValue(metric.key, \"cohesity.protectiongroup.*\") and isNotNull(cohesity.cluster.id) and isNotNull(cohesity.protectiongroup.id)",
+        "smartscapeEdge": {
+          "sourceType": "EXT_COHESITY_CLUSTER",
+          "sourceIdFieldName": "dt.smartscape.cohesity_cluster",
+          "edgeType": "contains",
+          "targetType": "EXT_COHESITY_PROTECTION_GROUP",
+          "targetIdFieldName": "dt.smartscape.cohesity_protection_group"
+        }
+      },
+      {
+        "id": "cohesity-protection-group-writes-to-storage-domain",
+        "description": "The edge that earns the topology its keep: it crosses the containment tree and answers which backup job is filling this storage domain. Requires the domain id to be present on the metric, so a group with no domain simply has no edge.",
+        "type": "smartscapeEdge",
+        "enabled": true,
+        "matcher": "matchesValue(metric.key, \"cohesity.protectiongroup.*\") and isNotNull(cohesity.protectiongroup.id) and isNotNull(cohesity.storagedomain.id)",
+        "smartscapeEdge": {
+          "sourceType": "EXT_COHESITY_PROTECTION_GROUP",
+          "sourceIdFieldName": "dt.smartscape.cohesity_protection_group",
+          "edgeType": "writes_to",
+          "targetType": "EXT_COHESITY_STORAGE_DOMAIN",
+          "targetIdFieldName": "dt.smartscape.cohesity_storage_domain"
+        }
+      }
+    ]
+  }
+}
