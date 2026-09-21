@@ -114,6 +114,26 @@ class TestRedaction:
         assert "401" in message
 
 
+class TestErrorHints:
+    def test_an_sso_rejection_is_not_reported_as_a_missing_scope(self):
+        # Seen for real against a sprint tenant: an expired OAuth bearer returns 403 with an SSO
+        # message, and "add a scope" is the wrong advice for a token that cannot authenticate.
+        sso = "An error occurred during SSO authentication to the Dynatrace environment."
+        body = {"error": {"message": sso}}
+
+        message = loop.friendly_error("GET", "/platform/extensions/v2/extensions", 403, body)
+
+        assert "SSO authentication, before any scope check" in message
+        assert "lacks a scope" not in message
+
+    def test_a_genuine_missing_scope_still_says_so(self):
+        body = {"error": {"message": "OAuth token is missing required scope. Use one of: [x:y:z]"}}
+
+        message = loop.friendly_error("GET", "/api/v1/deployment/installer", 403, body)
+
+        assert "lacks a scope" in message
+
+
 class TestHosts:
     @pytest.mark.parametrize(
         ("apps", "classic"),

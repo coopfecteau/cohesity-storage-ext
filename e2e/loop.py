@@ -339,6 +339,16 @@ def friendly_error(method: str, path: str, status: int, body: Any) -> str:
         409: "the tenant is still processing a previous upload - retry in a few seconds",
         415: "wrong Content-Type for this endpoint",
     }.get(status, "request failed")
+    if status == 403 and "sso authentication" in message.lower():
+        # Not a scope problem: the platform rejects the token before any scope is checked. Seen
+        # with short-lived OAuth access tokens past their expiry, and with platform tokens that
+        # cannot authenticate to this environment. Reporting it as a missing scope sends people
+        # off to add scopes to a token that will never work.
+        hint = (
+            "the token was rejected during SSO authentication, before any scope check - usually "
+            "an expired short-lived OAuth token, or a token for a different environment; use a "
+            "long-lived platform token (dt0s16...) created on this tenant"
+        )
     return f"{method} {path}: HTTP {status}, {hint}. Raw: {message[:500]}"
 
 
