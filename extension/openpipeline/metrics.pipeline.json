@@ -117,11 +117,11 @@
             },
             {
               "fieldName": "paused",
-              "referencedFieldName": "isPaused"
+              "referencedFieldName": "cohesity.protectiongroup.paused"
             },
             {
               "fieldName": "active",
-              "referencedFieldName": "isActive"
+              "referencedFieldName": "cohesity.protectiongroup.active"
             }
           ],
           "staticEdgesToExtract": []

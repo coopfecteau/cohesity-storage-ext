@@ -4,6 +4,7 @@
     python tools/local_cohesity_server.py --software-version 7.2   # pre-7.3: top-views 404s
     python tools/local_cohesity_server.py --http       # plain HTTP, for curl
     python tools/local_cohesity_server.py --drift      # numbers move; new runs every 5 min
+    python tools/local_cohesity_server.py --hostile-names   # names carry quotes, backslashes, newlines
 
 It serves the recorded fixtures in ``fixtures/``, which are SYNTHETIC unless a capture has
 replaced them - every response the extension parses here was hand-written from Cohesity's
@@ -75,6 +76,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "counters increment. Still SYNTHETIC. Default: serve the recorded values"
         ),
     )
+    parser.add_argument(
+        "--hostile-names",
+        action="store_true",
+        help=(
+            "append a quote, a backslash, a newline, a tab and non-ASCII to every cluster, "
+            "storage domain, view and protection group name, so a dt-sdk run proves dimension "
+            "values are escaped. Check the run with tools/validate_metric_lines.py. "
+            "Default: the recorded names"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -100,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         port=args.port,
         certfile=certfile,
         drift=args.drift,
+        hostile=args.hostile_names,
     )
     cluster.start()
 
@@ -109,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  version     {args.software_version or 'as recorded in v2_clusters_status.json'}")
     print(f"  timestamps  {'verbatim' if args.no_anchor else 'shifted forward to now'}")
     print(f"  drift       {'on - values move, new runs appear' if args.drift else 'off - recorded values'}")
+    name_mode = "HOSTILE - quotes, backslashes, newlines" if args.hostile_names else "as recorded"
+    print(f"  names       {name_mode}")
     if certfile:
         print(f"  certificate {certfile} (self-signed - set verifyTls false, or point caCertPath here)")
 

@@ -120,10 +120,10 @@ class ExtensionImpl(Extension):
 
         cluster_id = status.cluster_id
         cluster_name = status.name or config.name
-        self.report_metric(
+        self._emit(
             metrics.CLUSTER_COLLECTION_SUCCESS,
             1,
-            dimensions=metrics.cluster_dimensions(cluster_id, cluster_name),
+            metrics.cluster_dimensions(cluster_id, cluster_name),
         )
 
         # Each section is independent: a storage domain call that 403s must not cost the
@@ -159,15 +159,47 @@ class ExtensionImpl(Extension):
 
     def _report(self, samples: list[metrics.Sample]) -> None:
         for sample in samples:
+            self._emit(sample.key, sample.value, sample.dimensions, delta=sample.delta)
+
+    def _emit(self, key: str, value, dimensions: dict[str, str], *, delta: bool = False) -> None:
+        """The only call to ``report_metric`` in the extension. Every line leaves through here.
+
+        The SDK escapes nothing and checks little, and the ingest's only feedback on a bad line is
+        an "invalid metric lines" count with no key attached. So the line is made valid here -
+        names escaped and flattened, NaN and infinity dropped - rather than at each call site,
+        where one forgotten path is enough to bring the count back.
+        """
+        number = metrics.wire_value(value)
+        if number is None:
+            self._warn_once(
+                ("value", key),
+                f"{key}: skipped a sample whose value {value!r} is not a finite number - the "
+                f"line protocol has no spelling for it. Logged once per key",
+            )
+            return
+        try:
             self.report_metric(
-                sample.key,
-                sample.value,
-                dimensions=sample.dimensions,
+                key,
+                number,
+                dimensions=metrics.wire_dimensions(dimensions),
                 # Run outcomes are events being counted, not a state being read. A gauge would
                 # keep asserting the last run's status until the next one, and would make two
                 # failures in one interval indistinguishable from one.
-                metric_type=MetricType.DELTA if sample.delta else MetricType.GAUGE,
+                metric_type=MetricType.DELTA if delta else MetricType.GAUGE,
             )
+        except ValueError as exception:
+            # The SDK's own limits (50 dimensions, 2000 characters per line). Escaping can double
+            # a long name, so a handful of long names on one line can reach the length limit.
+            # One oversized line must not cost the rest of the section.
+            self._warn_once(("line", key), f"{key}: a sample was not reported - {exception}")
+
+    def _warn_once(self, marker: tuple[str, str], message: str) -> None:
+        # Once per key for the life of the process, not per poll: the same bad field comes back
+        # every interval, and a warning repeated every five minutes is one nobody reads.
+        warned = self.__dict__.setdefault("_warned", set())
+        if marker not in warned:
+            warned.add(marker)
+            self.logger.warning(message)
 
     def _report_cluster_storage(self, client: CohesityClient, cluster_id: str, cluster_name: str) -> None:
         storage = client.cluster_storage()
@@ -212,8 +244,8 @@ class ExtensionImpl(Extension):
         """Groups first, then runs - the runs endpoint does not return the storage domain.
 
         Fetching groups is what supplies ``cohesity.storagedomain.id`` on run metrics, and that
-        dimension is the whole ``writes_to`` edge. It also supplies isPaused/isActive, which the
-        runs summary omits.
+        dimension is the whole ``writes_to`` edge. It also supplies the paused and active flags,
+        which the runs summary omits.
         """
         groups = client.protection_groups()
         now_usecs = int(time.time() * 1_000_000)
@@ -239,7 +271,7 @@ class ExtensionImpl(Extension):
         not on this value being 0.
         """
         dimensions = metrics.cluster_dimensions(config.name, config.name)
-        self.report_metric(metrics.CLUSTER_COLLECTION_SUCCESS, 0, dimensions=dimensions)
+        self._emit(metrics.CLUSTER_COLLECTION_SUCCESS, 0, dimensions)
 
     # -- scheduling --------------------------------------------------------
 

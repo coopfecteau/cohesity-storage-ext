@@ -138,7 +138,7 @@ class TestDimensionKeys:
 
     def test_flags_are_absent_rather_than_false_when_unreported(self):
         # A missing flag and a flag that is off are different facts. Collapsing them would let
-        # an alert on isPaused=="false" silently cover jobs whose state was never reported.
+        # an alert on paused=="false" silently cover jobs whose state was never reported.
         dimensions = metrics.protection_group_dimensions(
             1001, "east", "g-1", "Nightly", is_paused=None, is_active=True
         )

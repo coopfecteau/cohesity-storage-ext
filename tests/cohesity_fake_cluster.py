@@ -21,6 +21,11 @@ field are modelled, so they can be seen failing here rather than at a customer:
   the numbers move plausibly over time and mints a fresh completed protection run per group
   every few minutes, so counters increment. Off by default: every other caller still sees the
   recorded bodies.
+* **Names nobody would type in a fixture.** Cluster, storage domain, view and protection group
+  names are free text on a real cluster, and the SDK does not escape dimension values. The
+  fixtures are all tidy ASCII, which is exactly why an unescaped quote shipped. ``hostile``
+  (``--hostile-names``) rewrites every name to carry a quote, a backslash, a newline and
+  non-ASCII, so a real ``dt-sdk run`` exercises the escaping end to end. Off by default.
 
 Following ``ssh_ext``: the server lives here so the tests can use it in process, and
 ``tools/local_cohesity_server.py`` is the runnable wrapper around it.
@@ -80,6 +85,7 @@ def resolve(
     software_version: str | None = None,
     shift_seconds: float = 0.0,
     drift_now: float | None = None,
+    hostile: bool = False,
 ) -> Response:
     """Answer one request. Pure, so the whole surface is testable without a socket.
 
@@ -91,6 +97,8 @@ def resolve(
         drift_now: a unix time to drift the numbers to (see :func:`drift`), or None to serve
             the recorded values. Applied after time-shifting, so generated runs are dated
             against the same clock as the shifted ones.
+        hostile: rewrite every entity name with :func:`hostile_names`. Applied last, so the
+            runs that drift generates are renamed too.
     """
     presented = (headers.get("apikey") or "").strip()
     if not presented or (api_key is not None and presented != api_key):
@@ -134,6 +142,8 @@ def resolve(
         body = shift_times(body, shift_seconds)
     if drift_now is not None:
         body = drift(path, body, drift_now)
+    if hostile:
+        body = hostile_names(path, body)
     return Response(200, body)
 
 
@@ -360,6 +370,49 @@ def _drift_runs(body: dict, now: float) -> None:
             )
 
 
+# -- hostile names --------------------------------------------------------------------------
+
+# Everything the line protocol treats specially, in one name: a quote (ends a value), a
+# backslash (escapes the next character - an SMB share is spelled DOMAIN\share), a newline
+# (ends the line), a tab, and non-ASCII (encoding). Appended rather than substituted, so every
+# entity stays recognisable in the output and two entities never end up with the same name.
+HOSTILE_NAME_SUFFIX = ' "quoted" CORP\\share\nsecond line\tZ\u00fcrich \u2713'
+
+PROTECTION_GROUPS_PATH = "/v2/data-protect/protection-groups"
+
+# (path, list field, name field) for every place a name the extension reports comes from.
+_HOSTILE_NAME_FIELDS = (
+    (STORAGE_DOMAINS_PATH, "storageDomains", "name"),
+    (TOP_VIEWS_PATH, "viewsStats", "viewName"),
+    ("/v2/stats/views", "viewsStats", "viewName"),
+    (PROTECTION_GROUPS_PATH, "protectionGroups", "name"),
+    (RUNS_SUMMARY_PATH, "protectionRunsSummary", "protectionGroupName"),
+)
+
+
+def hostile_name(name: str) -> str:
+    return f"{name}{HOSTILE_NAME_SUFFIX}"
+
+
+def hostile_names(path: str, body: Any) -> Any:
+    """Return a copy of ``body`` with every entity name rewritten by :func:`hostile_name`."""
+    body = copy.deepcopy(body)
+    if not isinstance(body, dict):
+        return body
+    if path == CLUSTER_STATUS_PATH:
+        for name_field in ("name", "clusterName"):
+            if isinstance(body.get(name_field), str):
+                body[name_field] = hostile_name(body[name_field])
+        return body
+    for fields_path, list_field, name_field in _HOSTILE_NAME_FIELDS:
+        if path != fields_path:
+            continue
+        for item in body.get(list_field) or []:
+            if isinstance(item, dict) and isinstance(item.get(name_field), str):
+                item[name_field] = hostile_name(item[name_field])
+    return body
+
+
 @dataclass
 class FakeCohesityCluster:
     """The resolver above, wrapped in a real socket so `dt-sdk run` can talk to it."""
@@ -372,6 +425,7 @@ class FakeCohesityCluster:
     port: int = 0
     certfile: str = ""
     drift: bool = False
+    hostile: bool = False
     requests: list[str] = field(default_factory=list)
 
     def __post_init__(self):
@@ -412,6 +466,7 @@ class FakeCohesityCluster:
                     software_version=cluster.software_version,
                     shift_seconds=cluster.shift_seconds,
                     drift_now=time.time() if cluster.drift else None,
+                    hostile=cluster.hostile,
                 )
                 encoded = json.dumps(answer.body).encode("utf-8")
                 self.send_response(answer.status)

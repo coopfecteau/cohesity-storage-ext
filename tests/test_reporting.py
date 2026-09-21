@@ -32,8 +32,7 @@ CLUSTER_NAME = "cohesity-demo-01"
 NOW_USECS = 1_789_600_000_000_000
 
 
-@pytest.fixture
-def client() -> CohesityClient:
+def replay_client() -> CohesityClient:
     return CohesityClient(
         ClusterConfig(
             name="cohesity-prod",
@@ -42,6 +41,48 @@ def client() -> CohesityClient:
             fixture_dir=str(FIXTURE_DIR),
         )
     )
+
+
+@pytest.fixture
+def client() -> CohesityClient:
+    return replay_client()
+
+
+def replay_samples(client: CohesityClient) -> list[metrics.Sample]:
+    """Every sample one full poll produces - the same sections, in the same order, as query().
+
+    A module-level function rather than a method so the wire-format and manifest tests check
+    exactly this set instead of a second, drifting copy of it.
+    """
+    samples = list(
+        metrics.cluster_storage_samples(CLUSTER_ID, CLUSTER_NAME, client.cluster_storage())
+    )
+    for call in CLUSTER_STATS_CALLS:
+        samples.extend(
+            metrics.cluster_time_series_samples(
+                CLUSTER_ID,
+                CLUSTER_NAME,
+                call["schemaName"],
+                client.cluster_time_series(call),
+            )
+        )
+    for view_metric in VIEW_METRICS:
+        samples.extend(
+            metrics.view_samples(
+                CLUSTER_ID, CLUSTER_NAME, view_metric, client.view_stats(view_metric)
+            )
+        )
+    samples.extend(
+        metrics.storage_domain_samples(CLUSTER_ID, CLUSTER_NAME, client.storage_domains())
+    )
+    groups = client.protection_groups()
+    samples.extend(metrics.protection_group_samples(CLUSTER_ID, CLUSTER_NAME, groups, NOW_USECS))
+    samples.extend(
+        metrics.protection_run_samples(
+            CLUSTER_ID, CLUSTER_NAME, client.new_protection_runs(), groups
+        )
+    )
+    return samples
 
 
 def by_key(samples: list[metrics.Sample], key: str) -> list[metrics.Sample]:
@@ -472,37 +513,7 @@ class TestWholePoll:
     """Every sample a full replay poll produces, checked as one set."""
 
     def all_samples(self, client) -> list[metrics.Sample]:
-        samples = list(
-            metrics.cluster_storage_samples(CLUSTER_ID, CLUSTER_NAME, client.cluster_storage())
-        )
-        for call in CLUSTER_STATS_CALLS:
-            samples.extend(
-                metrics.cluster_time_series_samples(
-                    CLUSTER_ID,
-                    CLUSTER_NAME,
-                    call["schemaName"],
-                    client.cluster_time_series(call),
-                )
-            )
-        for view_metric in VIEW_METRICS:
-            samples.extend(
-                metrics.view_samples(
-                    CLUSTER_ID, CLUSTER_NAME, view_metric, client.view_stats(view_metric)
-                )
-            )
-        samples.extend(
-            metrics.storage_domain_samples(CLUSTER_ID, CLUSTER_NAME, client.storage_domains())
-        )
-        groups = client.protection_groups()
-        samples.extend(
-            metrics.protection_group_samples(CLUSTER_ID, CLUSTER_NAME, groups, NOW_USECS)
-        )
-        samples.extend(
-            metrics.protection_run_samples(
-                CLUSTER_ID, CLUSTER_NAME, client.new_protection_runs(), groups
-            )
-        )
-        return samples
+        return replay_samples(client)
 
     def test_every_key_emitted_is_a_declared_key(self, client):
         # An undeclared key is dropped by the EEC without a word.

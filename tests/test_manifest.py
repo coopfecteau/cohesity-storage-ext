@@ -18,6 +18,7 @@ import pytest
 import yaml
 
 from cohesity_storage import metrics
+from tests.test_reporting import replay_client, replay_samples
 
 EXTENSION_DIR = Path(__file__).resolve().parent.parent / "extension"
 PIPELINE_PATH = EXTENSION_DIR / "openpipeline" / "metrics.pipeline.json"
@@ -43,6 +44,12 @@ def pipeline() -> dict:
 @pytest.fixture(scope="module")
 def activation_schema() -> dict:
     return json.loads((EXTENSION_DIR / "activationSchema.json").read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def emitted_dimensions() -> set[str]:
+    """Every dimension key a full replay poll actually sends - not what the constants claim."""
+    return {name for sample in replay_samples(replay_client()) for name in sample.dimensions}
 
 
 def node_processors(pipeline: dict) -> list[dict]:
@@ -395,20 +402,29 @@ class TestProcessorHygiene:
             assert processor["enabled"] is True
             assert processor["type"] == "smartscapeEdge"
 
-    def test_matchers_only_reference_dimensions_the_extension_emits(self, pipeline):
+    def test_matchers_only_reference_dimensions_the_extension_emits(self, pipeline, emitted_dimensions):
         """A matcher naming a field nothing sends matches nothing, silently and forever."""
-        emitted = {
-            metrics.DIM_CLUSTER_ID,
-            metrics.DIM_CLUSTER_NAME,
-            metrics.DIM_STORAGE_DOMAIN_ID,
-            metrics.DIM_STORAGE_DOMAIN_NAME,
-            metrics.DIM_PROTECTION_GROUP_ID,
-            metrics.DIM_PROTECTION_GROUP_NAME,
-        }
         for processor in self.all_processors(pipeline):
             for fragment in processor["matcher"].split("isNotNull(")[1:]:
                 field = fragment.split(")")[0]
-                assert field in emitted, f"{processor['id']} guards on unknown field {field}"
+                assert field in emitted_dimensions, f"{processor['id']} guards on unknown field {field}"
+
+    def test_every_field_a_node_rule_reads_is_a_dimension_the_extension_emits(
+        self, pipeline, emitted_dimensions
+    ):
+        """fieldsToExtract naming a field nothing sends extracts nothing - and says nothing.
+
+        This is what the camelCase rename would have broken silently: the Python moving to
+        ``cohesity.protectiongroup.paused`` while the pipeline still read ``isPaused``.
+        """
+        for processor in node_processors(pipeline):
+            node = processor["smartscapeNode"]
+            referenced = [entry["referencedFieldName"] for entry in node["idComponents"]]
+            referenced += [entry["referencedFieldName"] for entry in node.get("fieldsToExtract", [])]
+            if node.get("nodeName", {}).get("type") == "field":
+                referenced.append(node["nodeName"]["field"]["sourceFieldName"])
+            for name in referenced:
+                assert name in emitted_dimensions, f"{processor['id']} reads unknown field {name}"
 
     def test_matchers_only_reference_declared_metric_prefixes(self, pipeline):
         prefixes = (

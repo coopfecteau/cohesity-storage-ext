@@ -16,11 +16,13 @@ from cohesity_storage.config import ClusterConfig
 from cohesity_storage.errors import CohesityAuthError, CohesityEndpointError
 from cohesity_storage.fixtures import FixtureStore
 from tests.cohesity_fake_cluster import (
+    HOSTILE_NAME_SUFFIX,
     FakeCohesityCluster,
     resolve,
     self_signed_certificate,
     shift_times,
 )
+from tools.local_cohesity_server import parse_args
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures"
 GOOD_HEADERS = {"apikey": "demo"}
@@ -185,3 +187,57 @@ class TestOverASocket:
 
         with pytest.raises(CohesityEndpointError):
             client._transport.get("/stats/top-views", {"metric": "kNumBytesRead"})
+
+
+class TestHostileNames:
+    """``--hostile-names``: every name carries what the line protocol treats specially."""
+
+    NAME_FIELDS = [
+        ("/v2/clusters/status", None, "name"),
+        ("/v2/storage-domains", "storageDomains", "name"),
+        ("/v2/stats/top-views", "viewsStats", "viewName"),
+        ("/v2/data-protect/protection-groups", "protectionGroups", "name"),
+        ("/v2/data-protect/runs/summary", "protectionRunsSummary", "protectionGroupName"),
+    ]
+
+    def params(self, path: str) -> dict[str, str]:
+        # The fixture key for these two depends on the query, so ask exactly as the client does.
+        if path == "/v2/stats/top-views":
+            return {"metric": "kNumBytesRead"}
+        if path == "/v2/storage-domains":
+            return {"includeStats": "true"}
+        return {}
+
+    def names(self, body, list_field, name_field) -> list[str]:
+        items = [body] if list_field is None else body[list_field]
+        return [item[name_field] for item in items]
+
+    def test_the_suffix_carries_every_special_character(self):
+        for character in ('"', "\\", "\n", "\t"):
+            assert character in HOSTILE_NAME_SUFFIX
+        assert not HOSTILE_NAME_SUFFIX.isascii()
+
+    @pytest.mark.parametrize(("path", "list_field", "name_field"), NAME_FIELDS)
+    def test_every_name_the_extension_reports_is_rewritten(self, path, list_field, name_field):
+        params = self.params(path)
+        plain = resolve(store(), path, params, GOOD_HEADERS)
+        hostile = resolve(store(), path, params, GOOD_HEADERS, hostile=True)
+
+        assert plain.status == hostile.status == 200
+        before = self.names(plain.body, list_field, name_field)
+        after = self.names(hostile.body, list_field, name_field)
+        assert before
+        assert after == [name + HOSTILE_NAME_SUFFIX for name in before]
+
+    def test_off_by_default_and_ids_are_never_touched(self):
+        plain = resolve(store(), "/v2/data-protect/protection-groups", {}, GOOD_HEADERS)
+        hostile = resolve(store(), "/v2/data-protect/protection-groups", {}, GOOD_HEADERS, hostile=True)
+
+        assert HOSTILE_NAME_SUFFIX not in str(plain.body)
+        assert [group["id"] for group in plain.body["protectionGroups"]] == [
+            group["id"] for group in hostile.body["protectionGroups"]
+        ]
+
+    def test_the_wrapper_flag_defaults_off_and_turns_on(self):
+        assert parse_args([]).hostile_names is False
+        assert parse_args(["--hostile-names"]).hostile_names is True

@@ -151,7 +151,15 @@ so they cannot collide with a built-in field: `cohesity.cluster.id`, `cohesity.c
 `cohesity.storagedomain.id`, `cohesity.storagedomain.name`, `cohesity.protectiongroup.id`,
 `cohesity.protectiongroup.name`, `cohesity.view.id`, `cohesity.view.name`. The descriptive ones
 are bare, because they carry no identity and no rule reads them: `service`, `operation`,
-`status`, `result`, plus Cohesity's own `isSlaViolated`, `isPaused` and `isActive`.
+`status` and `result`. Cohesity's `isSlaViolated`, `isPaused` and `isActive` flags report as
+`cohesity.protectiongroup.sla_violated`, `.paused` and `.active` - namespaced because a bare
+`paused` in Grail says nothing about what is paused, and lowercase because the ingest protocol
+rejects any dimension key with an uppercase letter.
+
+Names are free text typed by a Cohesity admin, and the SDK does not escape dimension values, so
+every line leaves through one chokepoint that collapses whitespace and control characters
+(a newline would end the line), truncates to 250 characters and escapes `\` and `"`. A value
+that is NaN or infinite is skipped, with one warning per key.
 
 **View is dimensions, not an entity.** The poll is a top-20 ranking, and a sampled population
 makes an unstable entity set, so view throughput reports as `cohesity.cluster.view.throughput`

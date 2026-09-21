@@ -25,6 +25,9 @@ back - reporting 0 for an absent capacity reads as an outage, which is worse tha
 
 from __future__ import annotations
 
+import math
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -103,8 +106,12 @@ ALL_METRIC_KEYS = (
 # `status`, `result`) are deliberately bare: they are read as chart splits and detector `by:{}`
 # clauses, they carry no identity, and the smartscape rules never look at them.
 #
-# `isSlaViolated`, `isPaused` and `isActive` keep Cohesity's own camelCase spelling so that a
-# value seen in Grail can be matched against the API response it came from without a lookup.
+# The three protection-group flags are namespaced under the group's prefix rather than bare:
+# a bare `active` or `paused` in Grail says nothing about *what* is active, and would collide
+# with the first other extension to use the word. They are NOT spelled like Cohesity's
+# `isPaused`: the metric ingestion protocol only accepts lowercase dimension keys, and a single
+# uppercase letter makes the whole line invalid - that was every protection-group line up to
+# v0.1.1. The ingest rejects them silently apart from an "invalid metric lines" count.
 # ---------------------------------------------------------------------------
 
 DIM_CLUSTER_ID = "cohesity.cluster.id"
@@ -120,9 +127,9 @@ DIM_SERVICE = "service"
 DIM_OPERATION = "operation"
 DIM_STATUS = "status"
 DIM_RESULT = "result"
-DIM_SLA_VIOLATED = "isSlaViolated"
-DIM_PAUSED = "isPaused"
-DIM_ACTIVE = "isActive"
+DIM_SLA_VIOLATED = f"{PREFIX_PROTECTION_GROUP}.sla_violated"
+DIM_PAUSED = f"{PREFIX_PROTECTION_GROUP}.paused"
+DIM_ACTIVE = f"{PREFIX_PROTECTION_GROUP}.active"
 
 SERVICE_DATAPROTECT = "dataprotect"
 SERVICE_FILESERVICES = "fileservices"
@@ -396,7 +403,7 @@ def protection_group_samples(
 
     A counter cannot report an absence, so a job with a broken schedule emits nothing at all and
     looks identical to a healthy quiet one. This gauge is defined at every instant, which is why
-    it is the half of the contract that carries silence. ``isPaused`` rides alongside so an
+    it is the half of the contract that carries silence. The paused flag rides alongside so an
     alert can tell a deliberate pause from a broken job.
     """
     samples = []
@@ -493,6 +500,69 @@ def protection_run_samples(
 
 
 # ---------------------------------------------------------------------------
+# Wire format
+#
+# The SDK builds each line as ``f'{key}="{value}"'`` and escapes nothing, so whatever a
+# Cohesity admin typed into a name reaches the ingest verbatim. A quote ends the value early, a
+# backslash escapes the next character, and a newline ends the line - each one turns a valid
+# metric into an "invalid metric lines" count with no hint of which line or why. Names are the
+# only free text here, and the fixtures never contain any of these characters, which is why
+# every local run was clean. So every line is made safe here, at one chokepoint, rather than
+# trusted to whoever builds the dimensions.
+# ---------------------------------------------------------------------------
+
+#: Dynatrace truncates a dimension value past 255 characters. Cutting at 250 ourselves keeps
+#: the cut on our side of the escape - see :func:`wire_dimensions`.
+DIMENSION_VALUE_MAX_CHARS = 250
+
+# Any run of whitespace or control characters. Line breaks are the fatal ones, but a tab or a
+# stray control byte in a chart legend is noise nobody meant to type either.
+_UNPRINTABLE_RUN = re.compile(r"[\s\0-\037\177]+")
+
+
+def clean_dimension_value(value: Any) -> str:
+    """The text a dimension value should carry, before escaping. Empty means "leave it out"."""
+    if value is None:
+        return ""
+    text = _UNPRINTABLE_RUN.sub(" ", str(value)).strip()
+    # Truncated BEFORE escaping, so the cut can never land between a backslash and the
+    # character it escapes - a dangling backslash would escape the closing quote.
+    return text[:DIMENSION_VALUE_MAX_CHARS].rstrip()
+
+
+def escape_dimension_value(text: str) -> str:
+    # Backslash first, or the backslashes added for quotes would be doubled again.
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def wire_dimensions(dimensions: Mapping[str, Any] | None) -> dict[str, str]:
+    """Dimensions as they must reach ``report_metric``: cleaned, truncated and escaped.
+
+    An empty value is dropped rather than sent as ``""``: an empty dimension is a series split
+    on nothing, and "absent" is already how the rest of this module says "the cluster did not
+    say".
+    """
+    wired: dict[str, str] = {}
+    for key, value in (dimensions or {}).items():
+        text = clean_dimension_value(value)
+        if text:
+            wired[key] = escape_dimension_value(text)
+    return wired
+
+
+def wire_value(value: Any) -> float | int | None:
+    """A value the protocol can carry, or None. NaN and infinity have no line-protocol spelling.
+
+    Python prints them as ``nan`` and ``inf``, which the SDK would pass straight through into
+    an invalid line.
+    """
+    number = _number(value)
+    if isinstance(number, float) and not math.isfinite(number):
+        return None
+    return number
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -501,7 +571,7 @@ def _set_flag(dimensions: dict[str, str], key: str, value: bool | None) -> None:
     """Add a boolean dimension, or leave it out entirely when the cluster did not say.
 
     Absent rather than "false": a missing flag and a flag that is off are different facts, and
-    collapsing them would let an alert on ``isPaused=="false"`` silently cover jobs whose state
+    collapsing them would let an alert on ``paused=="false"`` silently cover jobs whose state
     was never reported.
     """
     if value is not None:
@@ -524,6 +594,7 @@ def _number(value: Any) -> float | int | None:
 __all__ = [
     "ALL_METRIC_KEYS",
     "CLUSTER_TIME_SERIES_MAP",
+    "DIMENSION_VALUE_MAX_CHARS",
     "PREFIX_CLUSTER",
     "PREFIX_PROTECTION_GROUP",
     "PREFIX_STORAGE_DOMAIN",
@@ -531,8 +602,10 @@ __all__ = [
     "Sample",
     "cluster_dimensions",
     "cluster_storage_samples",
+    "clean_dimension_value",
     "cluster_time_series_samples",
     "entity_id",
+    "escape_dimension_value",
     "protection_group_dimensions",
     "protection_group_samples",
     "protection_run_samples",
@@ -540,4 +613,6 @@ __all__ = [
     "storage_domain_samples",
     "view_dimensions",
     "view_samples",
+    "wire_dimensions",
+    "wire_value",
 ]
