@@ -244,6 +244,7 @@ class ExtensionImpl(Extension):
     # -- scheduling --------------------------------------------------------
 
     def _client_for(self, config: ClusterConfig) -> CohesityClient:
+        self._ensure_state()
         client = self._clients.get(config.key)
         if client is None:
             client = CohesityClient(config)
@@ -272,9 +273,12 @@ class ExtensionImpl(Extension):
         return due
 
     def _ensure_state(self) -> None:
-        # initialize() is the documented hook, but guarding here keeps query() safe if the SDK
-        # ever schedules a callback before it has run.
-        if not hasattr(self, "_last_run"):
+        # The SDK does not call initialize() in fastcheck mode - only on a normal run - yet
+        # fastcheck() still needs a client to probe the cluster. So every path that touches
+        # per-instance state goes through here rather than trusting initialize() to have run.
+        # Missing this surfaced on a real ActiveGate as "'ExtensionImpl' object has no
+        # attribute '_clients'" during monitoring-configuration assignment.
+        if not hasattr(self, "_clients"):
             self.initialize()
 
 
