@@ -181,3 +181,15 @@ ca.pem
 
 # Local editor / assistant config
 .claude/
+
+# e2e harness (e2e/): terraform state and vars hold live tokens; builds are throwaway.
+e2e/**/*.tfvars
+!e2e/**/*.tfvars.example
+e2e/**/.terraform/
+e2e/**/*.tfvars.json
+e2e/**/*.tfstate
+e2e/**/*.tfstate.*
+e2e/**/*.tfplan
+e2e/**/*.env
+e2e/**/.env*
+e2e/.dist/

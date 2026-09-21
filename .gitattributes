@@ -1,0 +1,6 @@
+# Scripts and templates that execute on Linux must keep LF endings in the working copy too.
+# Terraform renders EC2 user-data from the local file, so with core.autocrlf on a Windows
+# checkout, host.sh.tftpl would ship CRLF and fail on boot with "$'\r': command not found".
+*.sh     text eol=lf
+*.tftpl  text eol=lf
+*.tf     text eol=lf

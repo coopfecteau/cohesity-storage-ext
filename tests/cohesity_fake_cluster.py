@@ -16,6 +16,11 @@ field are modelled, so they can be seen failing here rather than at a customer:
   were written, so an age-since-last-success computed against them grows without bound. The
   server shifts time fields forward by default so the numbers stay plausible; ``anchor=None``
   turns that off and serves the bodies verbatim.
+* **Flat lines.** Static fixtures make every metric a constant, which hides whether a chart,
+  a rate or a run counter is actually wired. ``drift_now`` (``--drift`` on the wrapper) makes
+  the numbers move plausibly over time and mints a fresh completed protection run per group
+  every few minutes, so counters increment. Off by default: every other caller still sees the
+  recorded bodies.
 
 Following ``ssh_ext``: the server lives here so the tests can use it in process, and
 ``tools/local_cohesity_server.py`` is the runnable wrapper around it.
@@ -23,11 +28,14 @@ Following ``ssh_ext``: the server lives here so the tests can use it in process,
 
 from __future__ import annotations
 
+import copy
 import datetime
+import hashlib
 import ipaddress
 import json
 import ssl
 import threading
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -71,6 +79,7 @@ def resolve(
     api_key: str | None = None,
     software_version: str | None = None,
     shift_seconds: float = 0.0,
+    drift_now: float | None = None,
 ) -> Response:
     """Answer one request. Pure, so the whole surface is testable without a socket.
 
@@ -79,6 +88,9 @@ def resolve(
             accepted - an extension that forgets the header must see a 401, not data.
         software_version: overrides what /v2/clusters/status reports, which is what makes the
             7.3 views fork demonstrable from a fixture set recorded on 7.4.
+        drift_now: a unix time to drift the numbers to (see :func:`drift`), or None to serve
+            the recorded values. Applied after time-shifting, so generated runs are dated
+            against the same clock as the shifted ones.
     """
     presented = (headers.get("apikey") or "").strip()
     if not presented or (api_key is not None and presented != api_key):
@@ -120,6 +132,8 @@ def resolve(
         body["softwareVersion"] = software_version
     if shift_seconds:
         body = shift_times(body, shift_seconds)
+    if drift_now is not None:
+        body = drift(path, body, drift_now)
     return Response(200, body)
 
 
@@ -168,6 +182,184 @@ def _fixture_software_version(store: FixtureStore) -> str:
     return str(body.get("softwareVersion", "")) if isinstance(body, dict) else ""
 
 
+# -- drift ----------------------------------------------------------------------------------
+#
+# Everything below is a pure function of (path, body, now), so a test can pin the clock and a
+# restarted server picks up where it left off instead of resetting every series. Hash-derived
+# noise rather than `random` for the same reason: the same minute always yields the same value.
+
+# One completed run per protection group per period. Five minutes is well inside a 10-minute
+# e2e timeout yet slow enough that a 1-minute poll sees each run several times, which is what
+# exercises the run-id dedup rather than bypassing it.
+DRIFT_RUN_PERIOD_SECONDS = 300
+# How many past periods of generated runs a response carries. More than one, because a real
+# runs/summary window overlaps earlier polls and the extension must not recount those.
+DRIFT_RUN_LOOKBACK = 3
+DRIFT_FAILURE_RATE = 0.1
+# Capacity creeps up over a day and falls back, like ingest followed by garbage collection -
+# a monotonic creep would fill the synthetic cluster within weeks of uptime.
+DRIFT_CAPACITY_CYCLE_SECONDS = 24 * 3600
+DRIFT_CAPACITY_SWING = 0.02
+# +/- this fraction on rates, latencies and throughput, re-drawn every minute.
+DRIFT_NOISE = 0.15
+
+CLUSTER_STORAGE_PATH = "/v2/stats/cluster-storage"
+TIME_SERIES_STATS_PATH = "/v2/stats/time-series-stats"
+VIEWS_PATHS = (TOP_VIEWS_PATH, "/v2/stats/views")
+STORAGE_DOMAINS_PATH = "/v2/storage-domains"
+RUNS_SUMMARY_PATH = "/v2/data-protect/runs/summary"
+
+
+def drift(path: str, body: Any, now: float) -> Any:
+    """Return a copy of ``body`` with its numbers moved to where they would be at ``now``.
+
+    Values a real cluster reports as flat (ids, names, node counts, total capacity) are left
+    alone; only values that genuinely move - capacity used, IOPS, latency, CPU, throughput, and
+    the stream of completed runs - drift. The fixture itself is never touched, so its provenance
+    envelope still says SYNTHETIC, which is what these numbers remain.
+    """
+    body = copy.deepcopy(body)
+    if not isinstance(body, dict):
+        return body
+    if path == CLUSTER_STORAGE_PATH:
+        _drift_cluster_storage(body, now)
+    elif path == TIME_SERIES_STATS_PATH:
+        _drift_time_series(body, now)
+    elif path in VIEWS_PATHS:
+        _drift_views(body, now)
+    elif path == STORAGE_DOMAINS_PATH:
+        _drift_storage_domains(body, now)
+    elif path == RUNS_SUMMARY_PATH:
+        _drift_runs(body, now)
+    return body
+
+
+def _unit(*parts: Any) -> float:
+    """A stable pseudo-random number in [0, 1) for the given key."""
+    digest = hashlib.blake2b("|".join(str(part) for part in parts).encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") / 2**64
+
+
+def _noise(now: float, *key: Any) -> float:
+    return 1.0 + DRIFT_NOISE * (2.0 * _unit(int(now // 60), *key) - 1.0)
+
+
+def _capacity_phase(now: float) -> float:
+    return (now % DRIFT_CAPACITY_CYCLE_SECONDS) / DRIFT_CAPACITY_CYCLE_SECONDS
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _scaled(value: Any, factor: float) -> Any:
+    if not _is_number(value):
+        return value
+    return int(round(value * factor)) if isinstance(value, int) else round(value * factor, 3)
+
+
+def _drift_cluster_storage(body: dict, now: float) -> None:
+    total, used = body.get("totalCapacityBytes"), body.get("localUsageBytes")
+    if not (_is_number(total) and _is_number(used)):
+        return
+    growth = int(total * DRIFT_CAPACITY_SWING * _capacity_phase(now))
+    used = min(int(used) + growth, int(total))
+    body["localUsageBytes"] = used
+    # Kept consistent with used, or used + available != total gives the fake away on a chart.
+    body["localAvailableBytes"] = int(total) - used
+    if _is_number(body.get("dataProtectionPhysicalUsageBytes")):
+        body["dataProtectionPhysicalUsageBytes"] = int(body["dataProtectionPhysicalUsageBytes"]) + growth
+    if _is_number(body.get("dataProtectionLogicalUsageBytes")):
+        # Logical grows faster than physical: that gap is the data reduction ratio.
+        body["dataProtectionLogicalUsageBytes"] = int(body["dataProtectionLogicalUsageBytes"]) + 5 * growth
+
+
+def _drift_time_series(body: dict, now: float) -> None:
+    for series in body.get("timeSeriesStats") or []:
+        if not isinstance(series, dict):
+            continue
+        name = str(series.get("metricName", ""))
+        for index, point in enumerate(series.get("dataPoints") or []):
+            if not isinstance(point, dict):
+                continue
+            factor = _noise(now, name, index)
+            for field_name in ("int64Value", "doubleValue"):
+                value = _scaled(point.get(field_name), factor)
+                if _is_number(value) and name.endswith("Pct"):
+                    value = min(value, 100.0)
+                point[field_name] = value
+
+
+def _drift_views(body: dict, now: float) -> None:
+    for view in body.get("viewsStats") or []:
+        if not isinstance(view, dict):
+            continue
+        factor = _noise(now, "view", view.get("viewId"))
+        for stat in view.get("stats") or []:
+            windows = stat.get("valueInLastHours") if isinstance(stat, dict) else None
+            for window in windows or []:
+                if not isinstance(window, dict):
+                    continue
+                for field_name, value in list(window.items()):
+                    if field_name != "lastHours":
+                        window[field_name] = _scaled(value, factor)
+
+
+def _drift_storage_domains(body: dict, now: float) -> None:
+    factor = 1.0 + DRIFT_CAPACITY_SWING * _capacity_phase(now)
+    for domain in body.get("storageDomains") or []:
+        stats = domain.get("stats") if isinstance(domain, dict) else None
+        if not isinstance(stats, dict):
+            continue
+        for field_name in (
+            "totalLogicalUsageBytes",
+            "localTotalPhysicalUsageBytes",
+            "localTierResiliencyImpactBytes",
+        ):
+            stats[field_name] = _scaled(stats.get(field_name), factor)
+
+
+def _drift_runs(body: dict, now: float) -> None:
+    """Append freshly completed runs, one per group per period, with ids never served before."""
+    runs = body.get("protectionRunsSummary")
+    if not isinstance(runs, list):
+        return
+    templates: dict[str, dict] = {}
+    for run in runs:
+        if isinstance(run, dict) and run.get("protectionGroupId") and run.get("id"):
+            templates.setdefault(str(run["protectionGroupId"]), run)
+
+    period = DRIFT_RUN_PERIOD_SECONDS
+    # The newest period that has fully elapsed, so every generated run has already ended.
+    latest = int(now // period) - 1
+    for bucket in range(latest - DRIFT_RUN_LOOKBACK + 1, latest + 1):
+        for group_id, template in templates.items():
+            start = bucket * period + int(10 + 50 * _unit(group_id, bucket, "start"))
+            end = start + int(30 + (period - 120) * _unit(group_id, bucket, "duration"))
+            failed = _unit(group_id, bucket, "outcome") < DRIFT_FAILURE_RATE
+            factor = 0.5 + _unit(group_id, bucket, "size")
+            total_objects = template.get("totalObjectsCount")
+            succeeded_objects = total_objects
+            if failed and _is_number(total_objects):
+                succeeded_objects = int(total_objects * _unit(group_id, bucket, "objects"))
+            runs.append(
+                {
+                    **template,
+                    # Deterministic per period: re-polling serves the same run again, which
+                    # exercises the extension's dedup instead of inventing a second run.
+                    "id": f"{template['id']}-drift-{bucket}",
+                    "status": "Failed" if failed else "Succeeded",
+                    "startTimeUsecs": start * 1_000_000,
+                    "endTimeUsecs": end * 1_000_000,
+                    "bytesWritten": 0 if failed else _scaled(template.get("bytesWritten"), factor),
+                    "logicalSizeBytes": _scaled(template.get("logicalSizeBytes"), factor),
+                    "isSlaViolated": failed,
+                    "successObjectsCount": succeeded_objects,
+                    "totalObjectsCount": total_objects,
+                }
+            )
+
+
 @dataclass
 class FakeCohesityCluster:
     """The resolver above, wrapped in a real socket so `dt-sdk run` can talk to it."""
@@ -179,6 +371,7 @@ class FakeCohesityCluster:
     host: str = "127.0.0.1"
     port: int = 0
     certfile: str = ""
+    drift: bool = False
     requests: list[str] = field(default_factory=list)
 
     def __post_init__(self):
@@ -218,6 +411,7 @@ class FakeCohesityCluster:
                     api_key=cluster.api_key,
                     software_version=cluster.software_version,
                     shift_seconds=cluster.shift_seconds,
+                    drift_now=time.time() if cluster.drift else None,
                 )
                 encoded = json.dumps(answer.body).encode("utf-8")
                 self.send_response(answer.status)

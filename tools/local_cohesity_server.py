@@ -3,6 +3,7 @@
     python tools/local_cohesity_server.py              # https://127.0.0.1:8443, any apiKey
     python tools/local_cohesity_server.py --software-version 7.2   # pre-7.3: top-views 404s
     python tools/local_cohesity_server.py --http       # plain HTTP, for curl
+    python tools/local_cohesity_server.py --drift      # numbers move; new runs every 5 min
 
 It serves the recorded fixtures in ``fixtures/``, which are SYNTHETIC unless a capture has
 replaced them - every response the extension parses here was hand-written from Cohesity's
@@ -34,7 +35,7 @@ from tests.cohesity_fake_cluster import (  # noqa: E402
 )
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8443)
     parser.add_argument("--host", default="127.0.0.1")
@@ -65,7 +66,20 @@ def main() -> int:
     parser.add_argument(
         "--certfile", default="", help="PEM with cert and key; default is a throwaway self-signed one"
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--drift",
+        action="store_true",
+        help=(
+            "make capacity, IOPS, latency and throughput move over time and mint a new completed "
+            "protection run per group every few minutes, so charts are not flat lines and run "
+            "counters increment. Still SYNTHETIC. Default: serve the recorded values"
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
 
     store = FixtureStore(args.fixtures)
     keys = store.fixture_keys()
@@ -85,6 +99,7 @@ def main() -> int:
         host=args.host,
         port=args.port,
         certfile=certfile,
+        drift=args.drift,
     )
     cluster.start()
 
@@ -93,6 +108,7 @@ def main() -> int:
     print(f"  apiKey      {args.api_key or 'any non-empty value; an absent header gets 401'}")
     print(f"  version     {args.software_version or 'as recorded in v2_clusters_status.json'}")
     print(f"  timestamps  {'verbatim' if args.no_anchor else 'shifted forward to now'}")
+    print(f"  drift       {'on - values move, new runs appear' if args.drift else 'off - recorded values'}")
     if certfile:
         print(f"  certificate {certfile} (self-signed - set verifyTls false, or point caCertPath here)")
 

@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars (gitignored) - or skip the file entirely and use e2e/tf.sh / e2e/tf.ps1,
+# which export these from your own dotenv file without writing them anywhere.
+# Placeholders only. Never commit real values.
+
+region             = "us-east-1"
+dt_environment_url = "https://<env-id>.live.dynatrace.com" # sprint: https://<env-id>.sprint.dynatracelabs.com
+dt_paas_token      = "<installer token with InstallerDownload scope>"
+
+# activegate_group       = "cohesity-e2e"
+# extension_ca_cert_path = "C:/Users/<you>/.dynatrace/certificates/ca.pem"   # PUBLIC cert only
+# repo_ref               = "master"

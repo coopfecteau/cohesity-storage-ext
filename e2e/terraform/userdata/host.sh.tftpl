@@ -1,0 +1,115 @@
+#!/bin/bash
+# Boot script for the e2e host: Environment ActiveGate + fake Cohesity cluster on 127.0.0.1.
+# Rendered by terraform templatefile(): dollar-brace is terraform's, so shell variables here are
+# written $NAME without braces.
+#
+# No `set -x`: the installer token passes through a shell variable, and tracing would copy it
+# into the log below.
+set -euo pipefail
+exec > >(tee -a /var/log/cohesity-e2e-bootstrap.log) 2>&1
+echo "== cohesity e2e bootstrap $(date -u +%FT%TZ)"
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y --no-install-recommends git python3 openssl wget ca-certificates curl
+# snapd is still seeding on first boot; installing before it finishes fails intermittently.
+snap wait system seed.loaded
+snap install aws-cli --classic
+
+# The fake cluster uses datetime.UTC (3.11+). Ubuntu 24.04 ships 3.12; fail loudly if not.
+python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version' \
+  || { echo "python3 is older than 3.11 - the fake cluster will not run"; exit 1; }
+
+# --- 1. ActiveGate, in its own group -----------------------------------------------------------
+TOKEN="$(/snap/bin/aws ssm get-parameter --region '${region}' --name '${token_parameter_name}' \
+  --with-decryption --query Parameter.Value --output text)"
+# Classic tokens (dt0c01) use Api-Token; platform tokens with fleet-management:activegates:download
+# use Bearer. https://docs.dynatrace.com/docs/dynatrace-api/environment-api/deployment/activegate/download-activegate-latest
+case "$TOKEN" in
+  dt0c01.*) AUTH_SCHEME="Api-Token" ;;
+  *) AUTH_SCHEME="Bearer" ;;
+esac
+# arch is amd64/arm64/s390/all per the docs above (netapp_test's arch=x86 is not a listed value).
+wget -q -O /tmp/activegate.sh --header="Authorization: $AUTH_SCHEME $TOKEN" \
+  '${dt_url}/api/v1/deployment/installer/gateway/unix/latest?arch=amd64'
+unset TOKEN AUTH_SCHEME
+
+# bash, not sh: the installer aborts with "unsupported shell detected" under /bin/sh.
+# --set-group: https://docs.dynatrace.com/docs/ingest-from/dynatrace-activegate/installation/linux/linux-customize-installation-for-activegate
+/bin/bash /tmp/activegate.sh --set-group='${ag_group}'
+rm -f /tmp/activegate.sh
+
+# --- 2. Trust the extension-signing CA ---------------------------------------------------------
+# Without it assignment fails with "checking signature failed"; with the wrong owner it fails the
+# same way. https://docs.dynatrace.com/docs/ingest-from/extensions/develop-your-extensions/sign-extensions
+CERT_DIR=/var/lib/dynatrace/remotepluginmodule/agent/conf/certificates
+AG_USER=dtuserag
+AG_GROUP="$(id -gn "$AG_USER")"
+install -d -m 0755 -o "$AG_USER" -g "$AG_GROUP" "$CERT_DIR"
+cat > "$CERT_DIR/cohesity-e2e-ca.pem" <<'PEM'
+${extension_ca_pem}
+PEM
+chown "$AG_USER:$AG_GROUP" "$CERT_DIR/cohesity-e2e-ca.pem"
+chmod 0644 "$CERT_DIR/cohesity-e2e-ca.pem"
+
+# --- 3. Fake Cohesity cluster, from this public repo --------------------------------------------
+id cohesityfake >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin cohesityfake
+rm -rf /opt/cohesity-storage-ext
+git clone --quiet '${repo_url}' /opt/cohesity-storage-ext
+git -C /opt/cohesity-storage-ext checkout --quiet '${repo_ref}'
+echo "fake cluster source: ${repo_url} @ $(git -C /opt/cohesity-storage-ext rev-parse HEAD)"
+
+# --- 4. TLS the extension can actually verify --------------------------------------------------
+# A throwaway CA + leaf for IP:127.0.0.1. ca.crt is world-readable so dtuserag can use it as
+# caCertPath with verifyTls: true; server.pem (key + cert) is readable by the fake server only.
+install -d -m 0755 /etc/cohesity-fake
+bash /opt/cohesity-storage-ext/e2e/scripts/fake-cluster-cert.sh /etc/cohesity-fake
+chown cohesityfake:root /etc/cohesity-fake/server.pem
+chmod 0400 /etc/cohesity-fake/server.pem
+su -s /bin/sh "$AG_USER" -c 'test -r /etc/cohesity-fake/ca.crt' \
+  || { echo "dtuserag cannot read /etc/cohesity-fake/ca.crt"; exit 1; }
+
+cat > /etc/systemd/system/cohesity-fake.service <<'UNIT'
+[Unit]
+Description=Fake Cohesity cluster for the e2e harness (SYNTHETIC fixtures, loopback only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=cohesityfake
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -u /opt/cohesity-storage-ext/tools/local_cohesity_server.py --host 127.0.0.1 --port 8443 --api-key e2e-key --certfile /etc/cohesity-fake/server.pem --drift
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now cohesity-fake
+
+# Prove the exact path the extension will take: TLS verified against ca.crt, key in the header.
+for attempt in $(seq 1 30); do
+  if curl -fsS --cacert /etc/cohesity-fake/ca.crt -H 'apiKey: e2e-key' \
+      https://127.0.0.1:8443/v2/clusters/status >/dev/null; then
+    echo "fake cluster answering on https://127.0.0.1:8443 (TLS verified)"
+    break
+  fi
+  [ "$attempt" = 30 ] && { echo "fake cluster never answered"; journalctl -u cohesity-fake -n 30 --no-pager; exit 1; }
+  sleep 2
+done
+
+# --- 5. Restart so the ActiveGate and its extension module pick up the CA -------------------------
+systemctl enable dynatracegateway
+systemctl restart dynatracegateway
+# The EEC runs as its own unit on recent ActiveGates; restart it too when present.
+if systemctl list-unit-files extensionsmodule.service >/dev/null 2>&1 \
+    && systemctl list-unit-files extensionsmodule.service | grep -q extensionsmodule; then
+  systemctl restart extensionsmodule
+fi
+
+echo "== bootstrap complete: ActiveGate group '${ag_group}', fake cluster on 127.0.0.1:8443 (--drift)"

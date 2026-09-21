@@ -11,6 +11,7 @@ So these are the checks that would otherwise be a round trip to a tenant.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -53,8 +54,21 @@ def edge_processors(pipeline: dict) -> list[dict]:
 
 
 class TestManifest:
-    def test_the_version_is_the_one_this_ticket_builds(self, manifest):
-        assert manifest["version"] == "0.1.0"
+    def test_the_committed_version_is_a_release_not_an_e2e_dev_build(self, manifest):
+        # e2e/loop.py rewrites the version to 0.99.<minutes> for each dev build and restores it
+        # afterwards. If that restore ever failed, a dev version would ride into a commit - and
+        # from there into a release. Pinning a literal here instead broke on every bump.
+        version = str(manifest["version"])
+        assert re.fullmatch(r"\d+\.\d+\.\d+", version), version
+        assert not version.startswith("0.99."), f"e2e dev version committed: {version}"
+
+    def test_local_activation_only_requests_feature_sets_that_exist(self, manifest):
+        # activation.json once asked for "cluster" after the sets were renamed. The local SDK
+        # tolerated it; a real EEC may refuse a monitoring config naming an unknown set.
+        declared = {entry["featureSet"] for entry in manifest["python"]["featureSets"]}
+        activation = json.loads((EXTENSION_DIR.parent / "activation.json").read_text(encoding="utf-8"))
+
+        assert set(activation["featureSets"]) <= declared
 
     def test_every_declared_key_is_one_the_code_can_emit(self, manifest):
         declared = {entry["key"] for entry in manifest["metrics"]}
