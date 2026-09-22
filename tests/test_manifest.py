@@ -436,3 +436,137 @@ class TestProcessorHygiene:
             for fragment in processor["matcher"].split('matchesValue(metric.key, "')[1:]:
                 pattern = fragment.split('"')[0]
                 assert pattern.rstrip(".*") in prefixes, processor["id"]
+
+
+@pytest.fixture(scope="module")
+def dashboard(manifest) -> dict:
+    """The dashboard document as the tenant will parse it.
+
+    Packaged dashboards are the dashboard *content* - version, variables, tiles, layouts -
+    not the `{name, type, content}` envelope the Document Store API returns. Loading it here
+    is itself half the test: a trailing comma ships silently and fails on install.
+    """
+    entry = manifest["documents"]["dashboards"][0]
+    return json.loads((EXTENSION_DIR / entry["path"]).read_text(encoding="utf-8"))
+
+
+def dashboard_queries(dashboard: dict) -> dict[str, str]:
+    return {
+        tile_id: tile["query"]
+        for tile_id, tile in dashboard["tiles"].items()
+        if tile.get("type") == "data"
+    }
+
+
+class TestDashboard:
+    def test_it_ships_under_the_modern_documents_key(self, manifest):
+        # `dashboards:` is Dashboards Classic, deprecated since January 2026 and targeted for
+        # removal from SaaS by end of 2027. On a Gen3 tenant it may install nothing at all -
+        # silently, which is the expensive part.
+        assert "dashboards" not in manifest
+        entry = manifest["documents"]["dashboards"][0]
+
+        assert entry["displayName"]
+        assert entry["path"].endswith(".dashboard.json")
+        # The 10-per-extension ceiling.
+        assert len(manifest["documents"]["dashboards"]) <= 10
+
+    def test_the_referenced_file_exists_and_is_valid_json(self, manifest, dashboard):
+        assert (EXTENSION_DIR / manifest["documents"]["dashboards"][0]["path"]).is_file()
+        # The `dashboard` fixture already parsed it; assert the shape the tenant needs.
+        assert dashboard["tiles"]
+        assert isinstance(dashboard["version"], int)
+
+    def test_every_tile_has_a_layout_and_every_layout_a_tile(self, dashboard):
+        # A tile with no layout entry never renders; a layout with no tile is a blank hole.
+        assert set(dashboard["tiles"]) == set(dashboard["layouts"])
+
+    def test_tiles_fit_the_grid(self, dashboard):
+        columns = dashboard.get("settings", {}).get("gridLayout", {}).get("columnsCount", 24)
+        for tile_id, layout in dashboard["layouts"].items():
+            assert layout["x"] + layout["w"] <= columns, tile_id
+            assert layout["h"] > 0 and layout["w"] > 0, tile_id
+
+    def test_every_data_tile_has_a_query_and_a_visualization(self, dashboard):
+        for tile_id, tile in dashboard["tiles"].items():
+            if tile.get("type") != "data":
+                continue
+            assert tile["query"].strip(), tile_id
+            assert tile["visualization"], tile_id
+
+    def test_every_metric_key_referenced_is_one_the_extension_emits(self, dashboard):
+        """A tile querying a key nothing ingests renders empty forever, with no error.
+
+        Same failure mode as an undeclared key in the manifest, one layer further out, and
+        the reason this test reuses ``metrics.ALL_METRIC_KEYS`` rather than keeping its own
+        list to drift out of step.
+        """
+        emitted = set(metrics.ALL_METRIC_KEYS)
+        seen = set()
+        for tile_id, query in dashboard_queries(dashboard).items():
+            # A metric key only ever appears as the first argument of a timeseries
+            # aggregation; everything else spelled `cohesity.*` is a dimension.
+            keys = re.findall(
+                r"\b(?:sum|avg|min|max|count|median|percentile)\(\s*(cohesity[A-Za-z0-9_.]+)",
+                query,
+            )
+            for key in keys:
+                assert key in emitted, f"tile {tile_id} queries unknown metric {key}"
+            seen.update(keys)
+
+        assert seen, "no tile queries any metric at all"
+
+    def test_every_cohesity_token_in_a_query_is_a_real_key_or_dimension(
+        self, dashboard, emitted_dimensions
+    ):
+        known = set(metrics.ALL_METRIC_KEYS) | set(emitted_dimensions)
+        for tile_id, query in dashboard_queries(dashboard).items():
+            for token in re.findall(r"cohesity(?:\.[A-Za-z0-9_]+)+", query):
+                assert token in known, f"tile {tile_id} references unknown {token}"
+
+    def test_no_query_uses_a_retired_camelcase_dimension(self, dashboard):
+        """``isPaused``/``isActive``/``isSlaViolated`` were never valid and are gone.
+
+        The ingest protocol only accepts lowercase dimension keys - a single uppercase letter
+        made the whole metric line invalid, which is what silently dropped every
+        protection-group line up to v0.1.1. A dashboard is the easiest place for the old
+        spelling to survive, because a query against a dimension nobody sends just renders
+        blank.
+        """
+        retired = ("isPaused", "isActive", "isSlaViolated")
+        for tile_id, query in dashboard_queries(dashboard).items():
+            for name in retired:
+                assert name not in query, f"tile {tile_id} uses retired dimension {name}"
+            for token in re.findall(r"cohesity(?:\.[A-Za-z0-9_]+)+", query):
+                assert token == token.lower(), f"tile {tile_id} uses mixed-case {token}"
+
+    def test_run_outcome_is_summed_never_averaged(self, dashboard):
+        # It is a delta counter of runs reaching a terminal status. `avg` over it answers a
+        # question nobody asked and hides a second failure in the same interval.
+        for tile_id, query in dashboard_queries(dashboard).items():
+            if metrics.PROTECTION_GROUP_RUN_OUTCOME not in query:
+                continue
+            assert f"avg({metrics.PROTECTION_GROUP_RUN_OUTCOME}" not in query, tile_id
+            assert f"sum({metrics.PROTECTION_GROUP_RUN_OUTCOME}" in query, tile_id
+
+    def test_used_percent_is_computed_not_fetched(self, dashboard):
+        # Ticket 06 dropped the ingested derivative on purpose: it drifts from its inputs the
+        # moment one poll succeeds and the other fails. So no tile may resurrect the key, and
+        # at least one must do the division itself.
+        queries = dashboard_queries(dashboard)
+        for tile_id, query in queries.items():
+            assert "capacity.used_pct" not in query, tile_id
+
+        computed = [
+            query
+            for query in queries.values()
+            if metrics.CLUSTER_CAPACITY_USED in query and metrics.CLUSTER_CAPACITY_TOTAL in query
+        ]
+        assert computed, "no tile computes used % from used / total"
+
+    def test_no_tile_pins_its_own_timeframe(self, dashboard):
+        # The dashboard time picker owns the timeframe. A hardcoded `from:` silently ignores
+        # whatever the user selected.
+        for tile_id, query in dashboard_queries(dashboard).items():
+            assert "from:" not in query, tile_id
+            assert "timeframe:" not in query.replace("| fields timeframe", ""), tile_id

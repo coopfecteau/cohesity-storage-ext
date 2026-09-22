@@ -1,0 +1,485 @@
+{
+  "version": 21,
+  "variables": [],
+  "tiles": {
+    "1": {
+      "type": "markdown",
+      "content": "## 1 - Did protection succeed, and what is at risk?\n\nThe daily operational question for a data-protection platform. `cohesity.protectiongroup.run.outcome` is a **delta counter** of runs reaching a terminal status, so it is summed over the timeframe, never averaged. `cohesity.protectiongroup.last_success.age` is the only signal for a job that never ran - a group missing from these tiles is silent, and silence is not success."
+    },
+    "2": {
+      "type": "data",
+      "title": "Protection run outcomes over time",
+      "description": "Delta counter of runs reaching a terminal status, summed per interval and split by status.",
+      "query": "timeseries runs = sum(cohesity.protectiongroup.run.outcome), by:{status}",
+      "visualization": "barChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "xAxisScaling": "analyzedTimeframe",
+          "gapPolicy": "gap",
+          "legend": { "position": "bottom" }
+        },
+        "seriesConfig": { "gapPolicy": "gap" },
+        "layout": { "groupMode": "stacked", "position": "vertical" }
+      },
+      "querySettings": {}
+    },
+    "3": {
+      "type": "data",
+      "title": "Run outcomes in this timeframe",
+      "description": "Summed, not averaged - this is a delta counter. An empty tile means no run finished in the timeframe, which is not the same as every run succeeding.",
+      "query": "timeseries runs = sum(cohesity.protectiongroup.run.outcome, scalar:true), by:{status}\n| filter runs > 0\n| fields Outcome = status, Runs = runs\n| sort Runs desc",
+      "visualization": "donutChart",
+      "visualizationSettings": {
+        "dataMapping": { "value": "Runs", "displayedFields": ["Outcome"] },
+        "labels": { "showLabels": true },
+        "valueSettings": { "valueRepresentation": "absolute", "showTotals": true }
+      },
+      "querySettings": {}
+    },
+    "4": {
+      "type": "data",
+      "title": "Protection groups in SLA violation",
+      "description": "Distinct protection groups whose cohesity.protectiongroup.sla_violated dimension is true.",
+      "query": "timeseries age = max(cohesity.protectiongroup.last_success.age, scalar:true), by:{cohesity.protectiongroup.id, cohesity.protectiongroup.sla_violated}\n| filter cohesity.protectiongroup.sla_violated == \"true\"\n| summarize `Groups in SLA violation` = countDistinctExact(cohesity.protectiongroup.id)",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "recordField": "Groups in SLA violation",
+          "label": "SLA violations",
+          "showLabel": true,
+          "colorThresholdTarget": "value",
+          "sparklineSettings": { "isVisible": false },
+          "trend": { "isVisible": false }
+        },
+        "thresholds": [
+          {
+            "id": "sla",
+            "title": "",
+            "field": "Groups in SLA violation",
+            "isEnabled": true,
+            "rules": [
+              { "id": 0, "color": { "Default": "var(--dt-colors-charts-status-ideal-default, #2f6862)" }, "comparator": "≥", "label": "OK", "value": 0 },
+              { "id": 1, "color": { "Default": "var(--dt-colors-charts-status-critical-default, #c62239)" }, "comparator": "≥", "label": "Violating", "value": 1 }
+            ]
+          }
+        ]
+      },
+      "querySettings": {}
+    },
+    "5": {
+      "type": "data",
+      "title": "Longest time since a successful run",
+      "description": "Worst last_success.age across all protection groups, shown as a duration rather than raw milliseconds.",
+      "query": "timeseries age = max(cohesity.protectiongroup.last_success.age, scalar:true), by:{cohesity.protectiongroup.name}\n| summarize `Longest time since a successful run` = duration(toLong(max(age)), unit:\"ms\")",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "recordField": "Longest time since a successful run",
+          "label": "Worst backup age",
+          "showLabel": true,
+          "colorThresholdTarget": "value",
+          "sparklineSettings": { "isVisible": false },
+          "trend": { "isVisible": false }
+        }
+      },
+      "querySettings": {}
+    },
+    "6": {
+      "type": "data",
+      "title": "Time since last success, worst first",
+      "description": "One row per protection group. Paused explains a deliberate silence; a group that has never succeeded simply has the largest age. Never read a 0 here as an alert condition.",
+      "query": "timeseries age = max(cohesity.protectiongroup.last_success.age, scalar:true), by:{cohesity.protectiongroup.name, cohesity.protectiongroup.sla_violated, cohesity.protectiongroup.paused, cohesity.protectiongroup.active}\n| fieldsAdd `Time since last success` = duration(toLong(age), unit:\"ms\")\n| fields `Protection group` = cohesity.protectiongroup.name, `Time since last success`, `SLA violated` = cohesity.protectiongroup.sla_violated, Paused = cohesity.protectiongroup.paused, Active = cohesity.protectiongroup.active\n| sort `Time since last success` desc",
+      "visualization": "table",
+      "visualizationSettings": {
+        "table": {
+          "rowDensity": "condensed",
+          "enableSparklines": false,
+          "hiddenColumns": [],
+          "columnWidthStrategy": "content",
+          "colorThresholdTarget": "value"
+        }
+      },
+      "querySettings": {}
+    },
+    "7": {
+      "type": "data",
+      "title": "Backup age distribution",
+      "description": "How many protection groups sit in each staleness band.",
+      "query": "timeseries age = max(cohesity.protectiongroup.last_success.age, scalar:true), by:{cohesity.protectiongroup.name}\n| fieldsAdd bucket = if(age > 86400000, \"over 24h\", else: if(age > 43200000, \"12-24h\", else: if(age > 21600000, \"6-12h\", else: \"under 6h\")))\n| summarize `Protection groups` = count(), by:{`Time since last success` = bucket}\n| sort `Protection groups` desc",
+      "visualization": "categoricalBarChart",
+      "visualizationSettings": {
+        "dataMapping": { "displayedFields": ["Time since last success"], "values": ["Protection groups"] },
+        "categoryAxis": { "label": { "label": "Time since last success", "showLabel": true }, "tickLayout": "horizontal" },
+        "numericAxis": { "label": { "label": "Protection groups", "showLabel": true }, "scale": "linear" },
+        "layout": { "groupMode": "stacked", "position": "horizontal" }
+      },
+      "querySettings": {}
+    },
+    "10": {
+      "type": "markdown",
+      "content": "## 2 - Is capacity running out?\n\nThe slower burn that nobody looks at until it is urgent. Used percentage is **computed here from `capacity.used` and `capacity.total`** - the extension deliberately ingests no `used_pct` metric, because a stored derivative drifts from its inputs the moment one poll succeeds and the other fails. Garbage bytes are not free space."
+    },
+    "11": {
+      "type": "data",
+      "title": "Total capacity",
+      "query": "timeseries total = avg(cohesity.cluster.capacity.total)\n| fields `Total capacity` = arrayLast(total)",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "recordField": "Total capacity",
+          "label": "Total (raw)",
+          "showLabel": true,
+          "sparklineSettings": { "isVisible": false },
+          "trend": { "isVisible": false }
+        },
+        "unitsOverrides": [
+          { "identifier": "Total capacity", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+        ]
+      },
+      "querySettings": {}
+    },
+    "12": {
+      "type": "data",
+      "title": "Used capacity",
+      "query": "timeseries used = avg(cohesity.cluster.capacity.used)\n| fields `Used capacity` = arrayLast(used)",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "recordField": "Used capacity",
+          "label": "Used (physical)",
+          "showLabel": true,
+          "sparklineSettings": { "isVisible": false },
+          "trend": { "isVisible": false }
+        },
+        "unitsOverrides": [
+          { "identifier": "Used capacity", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+        ]
+      },
+      "querySettings": {}
+    },
+    "13": {
+      "type": "data",
+      "title": "Available capacity",
+      "query": "timeseries available = avg(cohesity.cluster.capacity.available)\n| fields `Available capacity` = arrayLast(available)",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "recordField": "Available capacity",
+          "label": "Available",
+          "showLabel": true,
+          "sparklineSettings": { "isVisible": false },
+          "trend": { "isVisible": false }
+        },
+        "unitsOverrides": [
+          { "identifier": "Available capacity", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+        ]
+      },
+      "querySettings": {}
+    },
+    "14": {
+      "type": "data",
+      "title": "Used %",
+      "description": "Computed in DQL from capacity.used / capacity.total - there is no ingested used_pct metric on purpose.",
+      "query": "timeseries { used = avg(cohesity.cluster.capacity.used), total = avg(cohesity.cluster.capacity.total) }\n| fieldsAdd `Used %` = arrayLast(used) * 100.0 / arrayLast(total)\n| fields `Used %`",
+      "visualization": "gauge",
+      "visualizationSettings": {
+        "valueBoundaries": { "min": { "mode": "custom", "value": 0 }, "max": { "mode": "custom", "value": 100 } },
+        "dataMapping": { "value": "Used %", "maxDataField": null, "minDataField": null },
+        "label": { "showLabel": true, "label": "Capacity used" },
+        "icon": { "showIcon": false, "icon": "MeterbarIcon" },
+        "thresholds": [
+          {
+            "id": "usedpct",
+            "title": "",
+            "field": "Used %",
+            "isEnabled": true,
+            "rules": [
+              { "id": 0, "color": { "Default": "var(--dt-colors-charts-status-ideal-default, #2f6862)" }, "comparator": "≥", "label": "OK", "value": 0 },
+              { "id": 1, "color": { "Default": "var(--dt-colors-charts-status-warning-default, #eea53c)" }, "comparator": "≥", "label": "Warning", "value": 80 },
+              { "id": 2, "color": { "Default": "var(--dt-colors-charts-status-critical-default, #c62239)" }, "comparator": "≥", "label": "Critical", "value": 90 }
+            ]
+          }
+        ],
+        "unitsOverrides": [
+          { "identifier": "Used %", "unitCategory": "unspecified", "baseUnit": "percent", "displayUnit": null, "decimals": 1, "suffix": "", "delimiter": false }
+        ]
+      },
+      "querySettings": {}
+    },
+    "15": {
+      "type": "data",
+      "title": "Data reduction ratio",
+      "description": "Logical bytes stored divided by physical bytes stored. The number capacity planning turns on.",
+      "query": "timeseries { logical = sum(cohesity.cluster.usage.logical), physical = sum(cohesity.cluster.usage.physical) }\n| fieldsAdd `Data reduction ratio` = arrayLast(logical) / arrayLast(physical)\n| fields `Data reduction ratio`",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "recordField": "Data reduction ratio",
+          "label": "Logical : physical",
+          "showLabel": true,
+          "sparklineSettings": { "isVisible": false },
+          "trend": { "isVisible": false }
+        },
+        "unitsOverrides": [
+          { "identifier": "Data reduction ratio", "unitCategory": "unspecified", "baseUnit": "ratio", "displayUnit": null, "decimals": 1, "suffix": "x", "delimiter": false }
+        ]
+      },
+      "querySettings": {}
+    },
+    "16": {
+      "type": "data",
+      "title": "Garbage awaiting collection",
+      "description": "Bytes held by data pending garbage collection. Capacity planning must not count these as free.",
+      "query": "timeseries garbage = avg(cohesity.cluster.garbage.bytes)\n| fields `Garbage awaiting collection` = arrayLast(garbage)",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "recordField": "Garbage awaiting collection",
+          "label": "Garbage",
+          "showLabel": true,
+          "sparklineSettings": { "isVisible": false },
+          "trend": { "isVisible": false }
+        },
+        "unitsOverrides": [
+          { "identifier": "Garbage awaiting collection", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+        ]
+      },
+      "querySettings": {}
+    },
+    "17": {
+      "type": "data",
+      "title": "Cluster capacity over time",
+      "query": "timeseries { Total = avg(cohesity.cluster.capacity.total), Used = avg(cohesity.cluster.capacity.used), Available = avg(cohesity.cluster.capacity.available) }, by:{cohesity.cluster.name}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "xAxisScaling": "analyzedTimeframe",
+          "gapPolicy": "gap",
+          "legend": { "position": "bottom" }
+        },
+        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" }
+      },
+      "querySettings": {}
+    },
+    "18": {
+      "type": "data",
+      "title": "Used % over time",
+      "description": "The runway. Same DQL-side computation as the gauge, kept per interval.",
+      "query": "timeseries { used = avg(cohesity.cluster.capacity.used), total = avg(cohesity.cluster.capacity.total) }, by:{cohesity.cluster.name}\n| fieldsAdd `Used %` = used[] * 100.0 / total[]\n| fields timeframe, interval, cohesity.cluster.name, `Used %`",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "xAxisScaling": "analyzedTimeframe",
+          "gapPolicy": "gap",
+          "legend": { "position": "bottom" }
+        },
+        "axes": {
+          "yAxis": { "label": "Used %", "showLabel": true, "min": { "mode": "custom", "value": 0 }, "max": { "mode": "custom", "value": 100 }, "scale": "linear" }
+        },
+        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" },
+        "unitsOverrides": [
+          { "identifier": "Used %", "unitCategory": "unspecified", "baseUnit": "percent", "displayUnit": null, "decimals": 1, "suffix": "", "delimiter": false }
+        ]
+      },
+      "querySettings": {}
+    },
+    "19": {
+      "type": "data",
+      "title": "Storage domains by usage",
+      "description": "Logical, physical and resiliency overhead per storage domain. The three metrics are appended rather than fetched together so a domain still lists when one of them is absent - a missing number is left null, never rendered as 0.",
+      "query": "timeseries { logical = avg(cohesity.storagedomain.usage.logical), physical = avg(cohesity.storagedomain.usage.physical) }, by:{cohesity.storagedomain.name}\n| fields domain = cohesity.storagedomain.name, logical = arrayLast(logical), physical = arrayLast(physical)\n| append [ timeseries resiliency = avg(cohesity.storagedomain.resiliency.bytes), by:{cohesity.storagedomain.name} | fields domain = cohesity.storagedomain.name, resiliency = arrayLast(resiliency) ]\n| summarize { Logical = max(logical), Physical = max(physical), `Resiliency overhead` = max(resiliency) }, by:{`Storage domain` = domain}\n| fieldsAdd `Reduction ratio` = Logical / Physical\n| sort Physical desc, `Resiliency overhead` desc",
+      "visualization": "table",
+      "visualizationSettings": {
+        "table": {
+          "rowDensity": "condensed",
+          "enableSparklines": false,
+          "hiddenColumns": [],
+          "columnWidthStrategy": "content",
+          "colorThresholdTarget": "value"
+        },
+        "unitsOverrides": [
+          { "identifier": "Logical", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false },
+          { "identifier": "Physical", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false },
+          { "identifier": "Resiliency overhead", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+        ]
+      },
+      "querySettings": {}
+    },
+    "20": {
+      "type": "data",
+      "title": "Logical vs physical usage by service",
+      "description": "Split by the service dimension - dataprotect or fileservices. The gap between the two lines is what deduplication and compression are buying.",
+      "query": "timeseries { Logical = sum(cohesity.cluster.usage.logical), Physical = sum(cohesity.cluster.usage.physical) }, by:{service}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "xAxisScaling": "analyzedTimeframe",
+          "gapPolicy": "gap",
+          "legend": { "position": "bottom" }
+        },
+        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" }
+      },
+      "querySettings": {}
+    },
+    "30": {
+      "type": "markdown",
+      "content": "## 3 - Is the cluster healthy right now?\n\nCPU, memory and I/O. Latency is in **microseconds** and is deliberately not converted - flash-backed Cohesity routinely serves sub-millisecond, and dividing by 1000 would round the whole signal away."
+    },
+    "31": {
+      "type": "data",
+      "title": "CPU and memory",
+      "query": "timeseries { CPU = avg(cohesity.cluster.cpu.usage), Memory = avg(cohesity.cluster.memory.usage) }, by:{cohesity.cluster.name}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "xAxisScaling": "analyzedTimeframe",
+          "gapPolicy": "gap",
+          "legend": { "position": "bottom" }
+        },
+        "axes": {
+          "yAxis": { "label": "Percent", "showLabel": true, "min": { "mode": "custom", "value": 0 }, "max": { "mode": "custom", "value": 100 }, "scale": "linear" }
+        },
+        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" }
+      },
+      "querySettings": {}
+    },
+    "32": {
+      "type": "data",
+      "title": "IOPS by operation",
+      "query": "timeseries IOPS = avg(cohesity.cluster.io.iops), by:{operation}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "xAxisScaling": "analyzedTimeframe",
+          "gapPolicy": "gap",
+          "legend": { "position": "bottom" }
+        },
+        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" }
+      },
+      "querySettings": {}
+    },
+    "33": {
+      "type": "data",
+      "title": "I/O latency by operation",
+      "description": "Microseconds. Not converted to milliseconds - sub-millisecond is the signal on flash.",
+      "query": "timeseries Latency = avg(cohesity.cluster.io.latency), by:{operation}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "xAxisScaling": "analyzedTimeframe",
+          "gapPolicy": "gap",
+          "legend": { "position": "bottom" }
+        },
+        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" },
+        "unitsOverrides": [
+          { "identifier": "Latency", "unitCategory": "time", "baseUnit": "microsecond", "displayUnit": null, "decimals": null, "suffix": "", "delimiter": false }
+        ]
+      },
+      "querySettings": {}
+    },
+    "34": {
+      "type": "data",
+      "title": "Top views by throughput",
+      "description": "View is a dimension, not an entity - the poll returns a top-N ranking, and rankings make bad entities.",
+      "query": "timeseries throughput = avg(cohesity.cluster.view.throughput, scalar:true), by:{cohesity.view.name, operation}\n| filter isNotNull(throughput)\n| fields View = cohesity.view.name, Operation = operation, Throughput = throughput\n| sort Throughput desc\n| limit 20",
+      "visualization": "categoricalBarChart",
+      "visualizationSettings": {
+        "dataMapping": { "displayedFields": ["View", "Operation"], "values": ["Throughput"] },
+        "categoryAxis": { "label": { "label": "View", "showLabel": true }, "tickLayout": "horizontal" },
+        "numericAxis": { "label": { "label": "Throughput", "showLabel": true }, "scale": "linear" },
+        "layout": { "groupMode": "stacked", "position": "horizontal" },
+        "unitsOverrides": [
+          { "identifier": "Throughput", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+        ]
+      },
+      "querySettings": {}
+    },
+    "40": {
+      "type": "markdown",
+      "content": "## 4 - Is the extension actually collecting?\n\nEvery tile above goes blank both when Cohesity is broken and when the extension is broken. `cohesity.cluster.collection_success` is the only thing that tells those two apart. **Read the absence of a 1, never the presence of a 0** - a pre-identity failure reports under the configured cluster name rather than the discovered one, so the failure lands on a different series from the success."
+    },
+    "41": {
+      "type": "data",
+      "title": "Polls answered",
+      "query": "timeseries success = avg(cohesity.cluster.collection_success)\n| fields `Polls answered` = arrayAvg(success) * 100.0",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "recordField": "Polls answered",
+          "label": "Polls answered",
+          "showLabel": true,
+          "colorThresholdTarget": "value",
+          "sparklineSettings": { "isVisible": false },
+          "trend": { "isVisible": false }
+        },
+        "thresholds": [
+          {
+            "id": "collection",
+            "title": "",
+            "field": "Polls answered",
+            "isEnabled": true,
+            "rules": [
+              { "id": 0, "color": { "Default": "var(--dt-colors-charts-status-critical-default, #c62239)" }, "comparator": "≥", "label": "Failing", "value": 0 },
+              { "id": 1, "color": { "Default": "var(--dt-colors-charts-status-warning-default, #eea53c)" }, "comparator": "≥", "label": "Intermittent", "value": 90 },
+              { "id": 2, "color": { "Default": "var(--dt-colors-charts-status-ideal-default, #2f6862)" }, "comparator": "≥", "label": "Healthy", "value": 100 }
+            ]
+          }
+        ],
+        "unitsOverrides": [
+          { "identifier": "Polls answered", "unitCategory": "unspecified", "baseUnit": "percent", "displayUnit": null, "decimals": 1, "suffix": "", "delimiter": false }
+        ]
+      },
+      "querySettings": {}
+    },
+    "42": {
+      "type": "data",
+      "title": "Collection success over time",
+      "description": "A gap here is the extension going quiet. That is a different failure from a 0, and the two must not be conflated.",
+      "query": "timeseries `Collection success` = avg(cohesity.cluster.collection_success), by:{cohesity.cluster.name}",
+      "visualization": "lineChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "xAxisScaling": "analyzedTimeframe",
+          "gapPolicy": "gap",
+          "legend": { "position": "bottom" }
+        },
+        "axes": {
+          "yAxis": { "label": "1 = answered", "showLabel": true, "min": { "mode": "custom", "value": 0 }, "max": { "mode": "custom", "value": 1 }, "scale": "linear" }
+        },
+        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" }
+      },
+      "querySettings": {}
+    }
+  },
+  "layouts": {
+    "1": { "x": 0, "y": 0, "w": 24, "h": 2 },
+    "2": { "x": 0, "y": 2, "w": 12, "h": 6 },
+    "3": { "x": 12, "y": 2, "w": 6, "h": 6 },
+    "4": { "x": 18, "y": 2, "w": 6, "h": 3 },
+    "5": { "x": 18, "y": 5, "w": 6, "h": 3 },
+    "6": { "x": 0, "y": 8, "w": 16, "h": 9 },
+    "7": { "x": 16, "y": 8, "w": 8, "h": 9 },
+    "10": { "x": 0, "y": 17, "w": 24, "h": 2 },
+    "11": { "x": 0, "y": 19, "w": 4, "h": 4 },
+    "12": { "x": 4, "y": 19, "w": 4, "h": 4 },
+    "13": { "x": 8, "y": 19, "w": 4, "h": 4 },
+    "14": { "x": 12, "y": 19, "w": 4, "h": 4 },
+    "15": { "x": 16, "y": 19, "w": 4, "h": 4 },
+    "16": { "x": 20, "y": 19, "w": 4, "h": 4 },
+    "17": { "x": 0, "y": 23, "w": 12, "h": 6 },
+    "18": { "x": 12, "y": 23, "w": 12, "h": 6 },
+    "19": { "x": 0, "y": 29, "w": 14, "h": 8 },
+    "20": { "x": 14, "y": 29, "w": 10, "h": 8 },
+    "30": { "x": 0, "y": 37, "w": 24, "h": 2 },
+    "31": { "x": 0, "y": 39, "w": 12, "h": 6 },
+    "32": { "x": 12, "y": 39, "w": 12, "h": 6 },
+    "33": { "x": 0, "y": 45, "w": 12, "h": 6 },
+    "34": { "x": 12, "y": 45, "w": 12, "h": 6 },
+    "40": { "x": 0, "y": 51, "w": 24, "h": 2 },
+    "41": { "x": 0, "y": 53, "w": 6, "h": 4 },
+    "42": { "x": 6, "y": 53, "w": 18, "h": 4 }
+  },
+  "settings": {
+    "gridLayout": { "columnsCount": 24 }
+  }
+}

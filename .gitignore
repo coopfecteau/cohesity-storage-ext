@@ -193,3 +193,8 @@ e2e/**/*.tfplan
 e2e/**/*.env
 e2e/**/.env*
 e2e/.dist/
+
+# Signing material lives here and must never be committed. The whole directory is
+# ignored rather than individual extensions: a .csr, a .srl or an openssl -text dump
+# is easy to add later and easy to forget, and this repo is public.
+certs/
