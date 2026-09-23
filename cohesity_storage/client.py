@@ -174,6 +174,11 @@ HOST_LINK_MARKERS = {
     "none": "hostLink:none",
     "capped": "hostLink:capped",
     "error": "hostLink:error",
+    # v0.2.0. Its own marker rather than a branch of the outcome above, so that "the uuids we
+    # are emitting look like instanceUuids" is said even on a poll whose outcome is the
+    # perfectly ordinary "linked" - which is exactly how v0.1.9 shipped 200 unmatchable series
+    # while every diagnostic on the channel read as success.
+    "instance_shaped": "hostLink:instanceShaped",
 }
 
 # The 7.3 boundary. Below it top-views does not exist; from it, views is deprecated.
@@ -1024,6 +1029,13 @@ class CohesityClient:
 
         links: list[domain.ProtectedObjectLink] = []
         verdicts: set[str] = set()
+        candidates: set[str] = set()
+        bios_field = ""
+        # Counted BEFORE the per-poll cap, unlike objects_linked. "200 objects, 200 BIOS uuids"
+        # and "200 objects, 0 BIOS uuids" are the two answers the diagnostic has to keep apart,
+        # and truncating the first at the cap would make it read like the second.
+        bios_uuids = 0
+        instance_shaped = 0
         seen = 0
         errored = 0
         capped = False
@@ -1038,6 +1050,10 @@ class CohesityClient:
                 continue
             seen += parsed.objects_seen
             verdicts.update(parsed.verdicts)
+            candidates.update(parsed.candidate_fields)
+            bios_field = bios_field or parsed.bios_field
+            bios_uuids += len(parsed.links)
+            instance_shaped += parsed.instance_shaped
             for link in parsed.links:
                 if len(links) >= cap_objects:
                     capped = True
@@ -1046,23 +1062,32 @@ class CohesityClient:
             if capped:
                 break
 
+        facts = {
+            "kind": "host_link",
+            "groups_vmware": len(vmware),
+            "groups_queried": len(selected),
+            "groups_errored": errored,
+            "objects_seen": seen,
+            "objects_linked": len(links),
+            "objects_bios": bios_uuids,
+            "instance_shaped": instance_shaped,
+            "bios_field": bios_field,
+            "candidates": sorted(candidates),
+            "capped": capped,
+            "cap": cap_objects,
+            "verdicts": sorted(verdicts),
+        }
+        if instance_shaped:
+            # A SECOND fact under its own marker, not a branch of the one below. The outcome
+            # fact would otherwise report a healthy "linked" and this would never be said.
+            self._diagnose(HOST_LINK_MARKERS["instance_shaped"], {**facts, "suspect": True})
         self._diagnose(
             HOST_LINK_MARKERS["capped"]
             if capped
             else HOST_LINK_MARKERS["linked"]
             if links
             else HOST_LINK_MARKERS["empty"],
-            {
-                "kind": "host_link",
-                "groups_vmware": len(vmware),
-                "groups_queried": len(selected),
-                "groups_errored": errored,
-                "objects_seen": seen,
-                "objects_linked": len(links),
-                "capped": capped,
-                "cap": cap_objects,
-                "verdicts": sorted(verdicts),
-            },
+            facts,
         )
         return links
 

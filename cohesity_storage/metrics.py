@@ -142,7 +142,19 @@ DIM_VIEW_NAME = "cohesity.view.name"
 # The join key, carried only by the bridge metric. Already normalised to canonical
 # lowercase 8-4-4-4-12 by domain.normalise_object_uuid - an unnormalised value here would
 # match no host and there would be nothing to say so.
+#
+# From v0.2.0 this carries the VM's **BIOS/SMBIOS** uuid, which is the identifier a Dynatrace
+# HOST publishes as host.additional_system_info["system.serial"]. Up to v0.1.9 it carried
+# `object.uuid`, which is vCenter's instanceUuid: a well-formed uuid for the same VM that no
+# HOST anywhere reports, so 200 series flowed and joined to nothing. The dimension NAME is
+# unchanged on purpose - the workflow, the pipeline and the metric contract all still read
+# `cohesity.object.uuid`, and only what fills it moved.
 DIM_OBJECT_UUID = "cohesity.object.uuid"
+# vCenter's own id for the same VM, carried alongside rather than instead. It joins nothing
+# here - Dynatrace does not publish it on a HOST - but it is the right key for a vCenter-side
+# join later, it costs one dimension rather than one series, and having both visible in Grail
+# is what makes the two identifiers impossible to confuse again. Omitted when absent.
+DIM_OBJECT_INSTANCE_UUID = "cohesity.object.instance_uuid"
 
 DIM_SERVICE = "service"
 DIM_OPERATION = "operation"
@@ -491,6 +503,11 @@ def protected_object_samples(
         if link.protection_group_name:
             dimensions[DIM_PROTECTION_GROUP_NAME] = link.protection_group_name
         dimensions[DIM_OBJECT_UUID] = link.uuid
+        if link.instance_uuid:
+            # Never a substitute for the line above and never a reason to emit one: a link with
+            # only an instanceUuid was already dropped by the `not link.uuid` guard, because an
+            # identifier that cannot match is worse than none - it looks like it works.
+            dimensions[DIM_OBJECT_INSTANCE_UUID] = link.instance_uuid
         samples.append(Sample(PROTECTION_GROUP_PROTECTS, 1, dimensions))
     return samples
 
@@ -978,6 +995,15 @@ def _host_link_event(fact: Mapping[str, Any]) -> dict:
     capped = bool(fact.get("capped"))
     cap = int(fact.get("cap") or 0)
     verdicts = [str(item) for item in fact.get("verdicts") or []][:MAX_DIAGNOSTIC_FIELDS]
+    # The v0.2.0 fields, and the reason this record exists at all. `objects_bios` is counted
+    # before the per-poll cap, so it says how many objects CAN be joined rather than how many
+    # were sent: "200 objects, 200 BIOS uuids, no edges" is a coverage question about the
+    # monitored estate, while "200 objects, 0 BIOS uuids" is a field-name question about this
+    # cluster's API. Those two were indistinguishable in v0.1.9 and both read as success.
+    bios = int(fact.get("objects_bios") or 0)
+    bios_field = str(fact.get("bios_field") or "")
+    candidates = [str(item) for item in fact.get("candidates") or []][:MAX_DIAGNOSTIC_FIELDS]
+    instance_shaped = int(fact.get("instance_shaped") or 0)
     common = {
         "cohesity.diagnostic": kind,
         "cohesity.host_link_groups_vmware": str(groups_vmware),
@@ -985,10 +1011,33 @@ def _host_link_event(fact: Mapping[str, Any]) -> dict:
         "cohesity.host_link_groups_errored": str(errored),
         "cohesity.host_link_objects_seen": str(objects),
         "cohesity.host_link_objects_linked": str(linked),
+        "cohesity.host_link_objects_bios": str(bios),
+        "cohesity.host_link_bios_field": bios_field,
+        "cohesity.host_link_uuid_candidates": ", ".join(candidates),
+        "cohesity.host_link_instance_shaped": str(instance_shaped),
         "cohesity.host_link_capped": "true" if capped else "false",
         "cohesity.host_link_cap": str(cap),
         "cohesity.host_link_verdicts": ", ".join(verdicts),
     }
+    if fact.get("suspect"):
+        # The shape sanity check, reported once and on its own marker. A VMware BIOS uuid
+        # starts 42 or 564d; a vCenter instanceUuid starts 50. If the field this cluster calls
+        # a BIOS uuid is handing back 50s, it is the v0.1.9 bug wearing a different field name,
+        # and the metric will join to nothing while looking perfectly healthy. The RATIO is the
+        # evidence: all of them means the field name is wrong, one of them means coincidence.
+        return {
+            "severity": SEVERITY_ERROR if instance_shaped == bios else SEVERITY_WARN,
+            "content": (
+                f"host link: {instance_shaped} of {bios} uuid(s) taken from "
+                f"'{bios_field or 'none'}' start with '{domain.INSTANCE_UUID_BYTE}', which is "
+                f"vCenter's instanceUuid signature - a VMware BIOS UUID starts 42 or 564d. If "
+                f"that is ALL of them the candidate field name is wrong and these will join to "
+                f"no Dynatrace HOST while looking healthy; if it is one or two it is "
+                f"coincidence. Candidate field(s) seen on these objects: "
+                f"{', '.join(candidates) or 'none'}"
+            ),
+            **common,
+        }
     if fact.get("error"):
         return {
             "severity": SEVERITY_WARN,
@@ -1014,18 +1063,21 @@ def _host_link_event(fact: Mapping[str, Any]) -> dict:
     if objects and not linked:
         # The loud one, and the reason ERROR rather than WARN. Everything upstream worked:
         # VMware groups exist, they were asked, they answered, and they returned objects -
-        # and not one of those objects carried something that could be a BIOS UUID. That
-        # retires the whole host-link design on this cluster, and no fallback join on names
-        # is attempted, because a name join produces confident wrong edges.
+        # and not one of those objects carried a BIOS UUID under any name this extension
+        # knows. `candidates` is what makes that actionable: it lists the uuid-ish fields the
+        # objects DID carry, so the right name can be added to domain.BIOS_UUID_FIELDS
+        # instead of the join being written off. No fallback to object.uuid and no fallback
+        # join on names: both draw confident wrong edges.
         return {
             "severity": SEVERITY_ERROR,
             "content": (
                 f"host link: {objects} VMware object(s) from {queried} protection group(s) "
-                f"carried NO usable BIOS UUID (uuid shapes seen: "
-                f"{', '.join(verdicts) or 'none'}), so no bridge metric was emitted and the "
-                f"protection-group to HOST join is NOT POSSIBLE on this cluster from run "
-                f"data. No fallback join on object names is attempted - it would produce "
-                f"confident wrong edges. The next place to look is /v2/data-protect/sources"
+                f"carried NO BIOS UUID under any known field name (shapes seen: "
+                f"{', '.join(verdicts) or 'none'}), so no bridge metric was emitted. This is "
+                f"a FIELD NAME answer, not a coverage one. uuid-ish field(s) these objects "
+                f"do carry: {', '.join(candidates) or 'none'} - if one of those is the BIOS "
+                f"uuid, add it to domain.BIOS_UUID_FIELDS. object.uuid is NOT used as a "
+                f"fallback: it is vCenter's instanceUuid and matches no Dynatrace HOST"
             ),
             **common,
         }
@@ -1043,13 +1095,20 @@ def _host_link_event(fact: Mapping[str, Any]) -> dict:
             ),
             **common,
         }
+    # The healthy case, and it has to say enough that a zero-match join can still be diagnosed
+    # from it alone. Naming the field that won and the candidates that were available is the
+    # same trick that settled the storage-domain field names: the next person does not have to
+    # guess what the cluster publishes, because the cluster already said.
     return {
         "severity": SEVERITY_WARN if errored else SEVERITY_INFO,
         "content": (
             f"host link: asked {queried} of {groups_vmware} VMware protection group(s) for "
-            f"object details ({errored} did not answer) and published {linked} of "
-            f"{objects} object(s) as a (protection group, BIOS UUID) pair. Unusable uuid "
-            f"shapes: {', '.join(verdicts) or 'none'}"
+            f"object details ({errored} did not answer); {objects} object(s) seen, {bios} "
+            f"carried a BIOS UUID (read from '{bios_field or 'none'}'; candidates present: "
+            f"{', '.join(candidates) or 'none'}), {linked} published as a (protection group, "
+            f"BIOS UUID) pair. If no HOST edge appears with {bios} of {objects} objects "
+            f"joinable, the answer is COVERAGE - those VMs are not OneAgent-monitored - not "
+            f"the field name. Objects with no BIOS UUID: {', '.join(verdicts) or 'none'}"
         ),
         **common,
     }

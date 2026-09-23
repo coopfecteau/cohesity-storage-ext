@@ -333,7 +333,7 @@ class TestProtectedObjectShape:
                                 "id": 4000 + index,
                                 "name": f"PLACEHOLDER-VM-{index}",
                                 "environment": "kVMware",
-                                "uuid": f"00112233-4455-6677-7303-3c757acff8d{index}",
+                                "uuid": f"00112233-4455-6677-8899-aabbccddee0{index}",
                                 "globalId": f"9:{4000 + index}",
                                 "vCenterSummary": {"isCloudEnv": False, "type": "kVCenter"},
                             }
@@ -404,7 +404,7 @@ class TestProtectedObjectShape:
         shape = domain.parse_protected_object_shape(self.vmware_payload(count=1))
 
         assert shape.uuid_samples == (
-            ("00112233-4455-6677-7303-3c757acff8d0", domain.UUID_VERDICT_CANONICAL),
+            ("00112233-4455-6677-8899-aabbccddee00", domain.UUID_VERDICT_CANONICAL),
         )
 
     def test_an_object_with_no_uuid_is_reported_as_missing_rather_than_skipped(self):

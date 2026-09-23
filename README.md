@@ -270,9 +270,35 @@ EXT_COHESITY_PROTECTION_GROUP ──protects──▶ HOST
 The join key is the **VMware BIOS UUID**. Dynatrace publishes it on a HOST as
 `host.additional_system_info["system.serial"]`, shaped
 `VMware-00 11 22 33 44 55 66 77-88 99 aa bb cc dd ee ff`; Cohesity publishes it on a protected
-object as `uuid`. Both normalise to `00112233-4455-6677-8899-aabbccddeeff`. It is a
-UUID-to-UUID join, not a hostname match — hostname matching across short name, FQDN and case
-produces confident wrong edges, which is worse than none.
+object under `vCenterSummary` as `biosUuid`. Both normalise to
+`00112233-4455-6677-8899-aabbccddeeff`. It is a UUID-to-UUID join, not a hostname match —
+hostname matching across short name, FQDN and case produces confident wrong edges, which is
+worse than none.
+
+> **Which of the two uuids — the v0.2.0 fix.** A vSphere VM carries *two* 8-4-4-4-12
+> identifiers. The **BIOS/SMBIOS uuid** is what the guest firmware reports; VMware mints it
+> starting `42` or `564d`, and it is the one Dynatrace puts in `system.serial`. The
+> **instanceUuid** is vCenter's own key for the VM; vCenter mints it starting `50`, and no
+> Dynatrace HOST publishes it anywhere. `objects[].object.uuid` is the **second** one.
+>
+> v0.1.9 emitted it. Measured on the customer's cluster: Cohesity answered
+> three `50…`-prefixed uuids while the three monitored hosts reported
+> `42…` and `564d…` prefixed serials. Two hundred bridge-metric series flowed, every
+> chart and every diagnostic read as success, and the join matched exactly nothing — because
+> both sides were well-formed uuids of the right shape for the same VMs.
+>
+> From v0.2.0 the BIOS uuid is read from an **ordered list of candidate field names**
+> (`domain.BIOS_UUID_FIELDS`: `biosUuid`, `biosUUID`, `vmBiosUuid`, `smbiosUuid`, `smBiosUuid`,
+> `hardwareUuid`, `biosUuidHex`), searched on the object root and in each VMware sub-object
+> (`vCenterSummary` first) — the same alias tolerance the storage-domain stats use, for the
+> same reason: the spelling moves across 6.8–7.4. **`object.uuid` is not on that list and must
+> never be added.** An object with no BIOS candidate yields no line at all, because an
+> identifier that cannot match is worse than none — it looks like the feature works.
+>
+> `cohesity.object.uuid` keeps its name: the workflow, the pipeline and every query written
+> against v0.1.9 still read it, and only what fills it moved. The instanceUuid now rides
+> alongside as `cohesity.object.instance_uuid` — one extra dimension, not one extra series, and
+> the right key for a vCenter-side join later.
 
 Three things make the mechanism work, and each is the non-obvious choice:
 
@@ -295,6 +321,24 @@ field at all — the keys are `childObjects`, `entityId`, `environment`, `id`, `
 If the VMware objects turn out to carry no usable UUID either, the extension says so as an
 **ERROR** on `cohesity_storage.diagnostics` (`cohesity.diagnostic == "host_link"`) and emits
 nothing. There is no fallback join on object names, deliberately.
+
+**The diagnostic separates a field-name answer from a coverage answer.** Both look like "no
+edges appeared in Smartscape", and in v0.1.9 they read identically. From v0.2.0 the host-link
+record carries `cohesity.host_link_objects_seen`, `cohesity.host_link_objects_bios` (counted
+*before* the per-poll cap), `cohesity.host_link_bios_field` — which candidate won — and
+`cohesity.host_link_uuid_candidates` — every uuid-ish field name the objects actually carried:
+
+| What the record says | What it means | What to do |
+|---|---|---|
+| `200 objects, 200 BIOS uuids` | The extension is publishing joinable keys | **Coverage.** Those VMs are not OneAgent-monitored. Nothing to fix here |
+| `200 objects, 0 BIOS uuids` | No candidate field name matched | **Field name.** Read `…uuid_candidates` and add the right spelling to `domain.BIOS_UUID_FIELDS` |
+| `n of n uuids start 50` | The chosen field is handing back instanceUuids | **Field name**, wearing a disguise — an ERROR on its own marker (`hostLink:instanceShaped`) |
+
+That last one is a shape sanity check on the value, not the name. A BIOS uuid starts `42` or
+`564d`; vCenter's instanceUuid starts `50`. Suspicious values are **counted and reported, not
+dropped** — one genuine BIOS uuid in 256 starts `50` by chance, and rejecting on the byte would
+silently lose real hosts. The *ratio* is the evidence: all of them means the field name is
+wrong, one of them means coincidence.
 
 ### Bounded scale — read this before turning it on
 

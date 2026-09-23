@@ -924,6 +924,173 @@ def normalise_object_uuid(value: Any) -> str:
     return "-".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# WHICH of a VMware VM's two uuids. This is the whole of the v0.2.0 fix.
+#
+# A vSphere VM carries two 8-4-4-4-12 identifiers and they are not interchangeable:
+#
+#   SMBIOS/BIOS UUID  what the guest's own firmware reports. VMware mints it starting ``42``
+#                     (or ``564d`` on a VM converted from Workstation/Server), and it is what
+#                     Dynatrace publishes on a HOST as
+#                     ``host.additional_system_info["system.serial"]``.
+#   instanceUuid      vCenter's own key for the VM. vCenter mints it starting ``50``, and
+#                     Dynatrace never publishes it on a HOST at all.
+#
+# ``objects[].object.uuid`` is the SECOND one. Measured on the customer's cluster: Cohesity
+# answered three 50...-prefixed uuids while the three monitored hosts reported
+# 42...- and 564d...-prefixed serials. Two hundred bridge-metric series flowed and matched
+# exactly nothing, and nothing anywhere said why, because both sides were well-formed uuids of
+# the right shape. That is the failure this block exists to make impossible to repeat.
+#
+# So the BIOS uuid is read from an ORDERED list of candidate field names - the same
+# alias-tolerance the storage-domain stats use, and for the same reason: the field is named
+# differently across 6.8-7.4 and the reference cannot be trusted to have the current spelling.
+# ``object.uuid`` is NOT in the list and must never be added. Falling back to it would restore
+# exactly the bug being fixed, and an identifier that cannot match is worse than no identifier
+# at all: it looks like the feature works.
+# ---------------------------------------------------------------------------
+
+#: Where a VMware protected object carries its BIOS UUID, most-trusted first. ``biosUuid`` is
+#: the spelling the 7.3.2 reference uses on the VMware object params; the rest are the
+#: spellings the same field takes elsewhere in the Cohesity and vSphere surface (vSphere's own
+#: API calls the SMBIOS uuid ``hardwareUuid`` on some views, and ``config.uuid`` elsewhere).
+#: Nothing here can be an instanceUuid, which is what makes the list safe to extend.
+BIOS_UUID_FIELDS = (
+    "biosUuid",
+    "biosUUID",
+    "vmBiosUuid",
+    "smbiosUuid",
+    "smBiosUuid",
+    "hardwareUuid",
+    "biosUuidHex",
+)
+
+#: vCenter's own id for the same VM, most-trusted first. Carried as a SEPARATE dimension, never
+#: as a fallback for the one above. ``uuid`` is last and is here only because the customer's
+#: cluster demonstrably puts the instanceUuid there - which is the bug this release fixes.
+INSTANCE_UUID_FIELDS = ("instanceUuid", "instanceUUID", "uuid")
+
+#: Sub-objects of ``objects[].object`` that a VMware-specific field may hide in, searched after
+#: the object root. ``vCenterSummary`` is the block the 7.3.2 reference documents and the one
+#: the v0.1.8 probe actually saw on the customer's cluster.
+VMWARE_OBJECT_BLOCKS = (
+    "vCenterSummary",
+    "vmwareParams",
+    "vmWareParams",
+    "vmwareObjectParams",
+    "esxiParams",
+)
+
+#: A canonical uuid starting with this byte came from vCenter, not from the VM's firmware. It is
+#: a heuristic, not a proof - one real BIOS uuid in 256 starts ``50`` by chance - so it is
+#: COUNTED and reported rather than used to drop a value. A ratio tells the two apart: 200 of
+#: 200 means the field name is wrong, 1 of 200 means a coincidence.
+INSTANCE_UUID_BYTE = "50"
+
+
+def looks_like_instance_uuid(uuid: str) -> bool:
+    """Whether a canonical uuid has vCenter's ``50`` signature rather than VMware firmware's.
+
+    Called on the value that was ALREADY chosen from :data:`BIOS_UUID_FIELDS`, so a true answer
+    means the field this cluster calls a BIOS uuid is carrying an instanceUuid - the v0.1.9 bug
+    wearing a different field name. See :data:`INSTANCE_UUID_BYTE` for why this counts rather
+    than rejects.
+    """
+    return uuid.startswith(INSTANCE_UUID_BYTE)
+
+
+def _candidate_blocks(obj: dict) -> list[tuple[str, dict]]:
+    """The object root, then each VMware-specific sub-object it actually carries.
+
+    A list of ``(label prefix, mapping)`` so a found field can be reported as ``block.field``
+    rather than as a bare name that says nothing about where to look for it next time.
+    """
+    blocks: list[tuple[str, dict]] = [("", obj)]
+    blocks.extend(
+        (name, obj[name]) for name in VMWARE_OBJECT_BLOCKS if isinstance(obj.get(name), dict)
+    )
+    return blocks
+
+
+def _uuid_from(obj: dict, names: tuple[str, ...]) -> tuple[str, str]:
+    """The first of ``names`` anywhere on ``obj`` that normalises, and where it was found.
+
+    Name priority beats location priority - every block is searched for ``biosUuid`` before any
+    block is searched for ``hardwareUuid`` - because the names are ordered by how much they are
+    trusted to mean "BIOS uuid" and the blocks are not ordered by anything. The returned label
+    is ``field`` or ``block.field``, which is a NAME and goes out on the diagnostics channel;
+    the value stays behind.
+
+    A present-but-unusable candidate falls through to the next name rather than ending the
+    search, exactly as :func:`first_number` does: a field published with null in it has told us
+    nothing, and a later alias may still carry the identifier.
+    """
+    for name in names:
+        for prefix, block in _candidate_blocks(obj):
+            uuid = normalise_object_uuid(block.get(name))
+            if uuid:
+                return uuid, f"{prefix}.{name}" if prefix else name
+    return "", ""
+
+
+def bios_uuid_verdict(obj: Any) -> str:
+    """The :func:`uuid_shape` of the first BIOS candidate this object carries at all.
+
+    Called only when :func:`bios_uuid` found nothing, and it is the difference between the two
+    answers that matter: :data:`UUID_VERDICT_MISSING` means no candidate field exists on the
+    object, so the field NAME is what needs fixing; anything else means a candidate exists and
+    the value in it is the wrong shape, which is a different conversation entirely.
+    """
+    if not isinstance(obj, dict):
+        return UUID_VERDICT_MISSING
+    for name in BIOS_UUID_FIELDS:
+        for _, block in _candidate_blocks(obj):
+            if block.get(name) is not None:
+                return uuid_shape(block.get(name))
+    return UUID_VERDICT_MISSING
+
+
+def bios_uuid(obj: Any) -> tuple[str, str]:
+    """A VM's BIOS UUID as a canonical uuid, and the field name it came from.
+
+    Two empties when no candidate carries one. That is the deliberate outcome: the caller
+    emits nothing for this object rather than reaching for ``object.uuid``, and the host-link
+    diagnostic says how many objects that happened to - which is what tells a wrong field name
+    ("200 objects, 0 BIOS uuids") apart from an unprotected estate.
+    """
+    return _uuid_from(obj, BIOS_UUID_FIELDS) if isinstance(obj, dict) else ("", "")
+
+
+def instance_uuid(obj: Any) -> str:
+    """vCenter's instanceUuid for the same VM, or ``""``.
+
+    Not a join key for anything shipped here - a Dynatrace HOST does not publish it. It rides
+    as its own dimension because it is the key a future vCenter-side join needs, it costs one
+    dimension rather than one series, and it is the value that makes the v0.1.9 mistake
+    legible in Grail: an operator can see the ``50`` id and the ``42`` id side by side.
+    """
+    return _uuid_from(obj, INSTANCE_UUID_FIELDS)[0] if isinstance(obj, dict) else ""
+
+
+def candidate_uuid_fields(obj: Any) -> tuple[str, ...]:
+    """Which candidate field names are actually PRESENT on this object, sorted, as labels.
+
+    Names only, no values - the same trick that settled the storage-domain field names. Both
+    candidate lists are reported, because "biosUuid is absent and instanceUuid is present" and
+    "neither is present" are different answers needing different next steps.
+    """
+    if not isinstance(obj, dict):
+        return ()
+    blocks = _candidate_blocks(obj)
+    found = {
+        f"{prefix}.{name}" if prefix else name
+        for name in BIOS_UUID_FIELDS + INSTANCE_UUID_FIELDS
+        for prefix, block in blocks
+        if block.get(name) is not None
+    }
+    return tuple(sorted(found))
+
+
 #: Cohesity's ``environment`` values that mean "this object came out of vSphere". Matched
 #: case-insensitively as a substring so ``kVMware``, ``kVMwareVCenter`` and whatever 7.5 calls
 #: it all count - the alternative is a whitelist that goes stale on the next Cohesity release
@@ -947,12 +1114,17 @@ class ProtectedObjectLink:
     """One protected VM, reduced to the pair that can be joined to a Dynatrace HOST.
 
     Nothing else about the object travels: not its name, not its address, not its Cohesity id.
-    The uuid is already normalised, so a link that exists is one that can be emitted.
+
+    :attr:`uuid` is the VM's **BIOS** uuid, already normalised, so a link that exists is one
+    that can be emitted. :attr:`instance_uuid` is vCenter's id for the same VM and joins
+    nothing on the Dynatrace side; it rides along because it is the key a vCenter-side join
+    would need, and because seeing both at once is what makes the v0.1.9 confusion legible.
     """
 
     protection_group_id: str
     protection_group_name: str
     uuid: str
+    instance_uuid: str = ""
 
 
 @dataclass(frozen=True)
@@ -962,12 +1134,23 @@ class ProtectedObjectLinks:
     ``verdicts`` is what makes "VMware objects carry no uuid" sayable out loud. Without it an
     estate whose objects are all ``numeric-id`` looks identical to one where the request
     failed, and the ticket's instruction is that this case must be loud rather than silent.
+
+    ``bios_field`` and ``candidate_fields`` are the v0.2.0 addition and they answer the
+    question v0.1.9 could not: WHICH identifier is being emitted. The first is the candidate
+    that won, the second is every candidate the objects actually carried. "0 links, candidates
+    present: uuid" is a field-name answer; "200 links from biosUuid" is not.
     """
 
     links: tuple[ProtectedObjectLink, ...] = ()
     objects_seen: int = 0
     #: Sorted unique :func:`uuid_shape` verdicts of the objects that produced NO link.
     verdicts: tuple[str, ...] = ()
+    #: The :data:`BIOS_UUID_FIELDS` label that produced the links, e.g. ``vCenterSummary.biosUuid``.
+    bios_field: str = ""
+    #: Every candidate field name present on the objects, whether or not it was chosen.
+    candidate_fields: tuple[str, ...] = ()
+    #: How many emitted uuids carry vCenter's ``50`` signature - see :func:`looks_like_instance_uuid`.
+    instance_shaped: int = 0
 
 
 def parse_protected_object_links(
@@ -989,9 +1172,17 @@ def parse_protected_object_links(
 
     Duplicates are collapsed. One VM appearing in three of a group's last runs is one link,
     and emitting it three times would be three identical metric lines per poll.
+
+    The uuid taken is the **BIOS** one, read through :func:`bios_uuid`. Up to v0.1.9 it was
+    ``object.uuid``, which is vCenter's instanceUuid and matches no Dynatrace HOST; see
+    :data:`BIOS_UUID_FIELDS`. An object with no BIOS candidate yields no link at all rather
+    than falling back to the identifier that cannot match.
     """
     links: dict[str, ProtectedObjectLink] = {}
     rejected: set[str] = set()
+    candidates: set[str] = set()
+    chosen_field = ""
+    instance_shaped = 0
     seen = 0
     for raw in _run_entries(payload):
         if group_id and _text(raw.get("protectionGroupId")) not in ("", group_id):
@@ -1003,21 +1194,35 @@ def parse_protected_object_links(
             if not isinstance(obj, dict):
                 continue
             seen += 1
-            uuid = normalise_object_uuid(obj.get("uuid"))
+            # Field NAMES, gathered for every object whether or not it yields a link: this is
+            # the list that says "the cluster publishes instanceUuid and nothing else", which
+            # is the only thing that distinguishes a wrong field name from an empty estate.
+            candidates.update(candidate_uuid_fields(obj))
+            uuid, field = bios_uuid(obj)
             if not uuid:
                 # The shape verdict, not the value: this set leaves the ActiveGate in a
                 # diagnostic, and an unusable identifier is still the customer's data.
-                rejected.add(uuid_shape(obj.get("uuid")))
+                rejected.add(bios_uuid_verdict(obj))
                 continue
+            chosen_field = chosen_field or field
+            if looks_like_instance_uuid(uuid):
+                # Counted, not dropped. One real BIOS uuid in 256 starts 50 by chance, so
+                # rejecting on the byte would silently lose real hosts - the very failure
+                # mode this release exists to end. The RATIO is what carries the meaning.
+                instance_shaped += 1
             links[uuid] = ProtectedObjectLink(
                 protection_group_id=namespaced_group_id or group_id,
                 protection_group_name=group_name,
                 uuid=uuid,
+                instance_uuid=instance_uuid(obj),
             )
     return ProtectedObjectLinks(
         links=tuple(links[uuid] for uuid in sorted(links)),
         objects_seen=seen,
         verdicts=tuple(sorted(rejected)),
+        bios_field=chosen_field,
+        candidate_fields=tuple(sorted(candidates)),
+        instance_shaped=instance_shaped,
     )
 
 
@@ -1225,8 +1430,11 @@ def _sequence(payload: Any, key: str) -> list:
 
 # Re-exported so the metric layer can namespace ids without importing the whole domain module.
 __all__ = [
+    "BIOS_UUID_FIELDS",
     "CLUSTER_ALTERNATE_ID_FIELDS",
     "CLUSTER_ID_FIELDS",
+    "INSTANCE_UUID_BYTE",
+    "INSTANCE_UUID_FIELDS",
     "NON_TERMINAL_RUN_STATUSES",
     "MAX_UUID_SAMPLES",
     "RUN_ALTERNATE_BACKUP_KEYS",
@@ -1244,6 +1452,7 @@ __all__ = [
     "UUID_VERDICT_NUMERIC",
     "UUID_VERDICT_OTHER",
     "VMWARE_ENVIRONMENT_HINT",
+    "VMWARE_OBJECT_BLOCKS",
     "VMWARE_SUMMARY_HINTS",
     "ClusterStatus",
     "ClusterStorage",
@@ -1258,9 +1467,14 @@ __all__ = [
     "StorageDomain",
     "TimeSeriesMetric",
     "ViewStats",
+    "bios_uuid",
+    "bios_uuid_verdict",
+    "candidate_uuid_fields",
     "cluster_id_candidates",
     "first_number",
+    "instance_uuid",
     "is_vmware_environment",
+    "looks_like_instance_uuid",
     "namespace_id",
     "new_terminal_runs",
     "normalise_object_uuid",

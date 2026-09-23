@@ -205,6 +205,181 @@ class TestTheBridgeMetric:
         assert sample.dimensions[metrics.DIM_OBJECT_UUID] == CANONICAL
 
 
+class TestWhichOfTheTwoUuids:
+    """v0.2.0. A VMware VM has two 8-4-4-4-12 identifiers and only one of them can ever join.
+
+    v0.1.9 emitted the other one. Two hundred bridge-metric series flowed, every diagnostic on
+    the channel read as success, and the join matched nothing - because both identifiers are
+    well-formed uuids for the same VM and nothing downstream could tell them apart. These are
+    the tests that make that specific mistake fail loudly instead of silently.
+    """
+
+    #: What Dynatrace publishes on a HOST as system.serial. VMware firmware mints 42 and 564d.
+    BIOS = "42000000-1111-4222-8333-444444444401"
+    #: What Cohesity's object.uuid actually returns. vCenter mints 50, and no HOST reports it.
+    INSTANCE = "50000000-1111-4222-8333-444444444401"
+
+    def obj(self, **summary):
+        return {"id": 4001, "name": "vm-a", "uuid": self.INSTANCE, "vCenterSummary": summary}
+
+    def test_the_bios_uuid_is_taken_and_the_instance_uuid_is_not(self):
+        uuid, field = domain.bios_uuid(self.obj(biosUuid=self.BIOS, instanceUuid=self.INSTANCE))
+
+        assert uuid == self.BIOS
+        assert field == "vCenterSummary.biosUuid"
+
+    def test_object_uuid_is_never_a_fallback_for_a_missing_bios_uuid(self):
+        """The whole fix in one assertion.
+
+        An identifier that cannot match is worse than none: it looks like the feature works.
+        Falling back here would restore v0.1.9 exactly, and no diagnostic would notice.
+        """
+        assert domain.bios_uuid({"id": 4001, "uuid": self.INSTANCE}) == ("", "")
+        assert "uuid" not in domain.BIOS_UUID_FIELDS
+
+    def test_the_candidates_are_tried_in_their_declared_order(self):
+        # Alias tolerance with a preference, exactly as the storage-domain stats do it: the
+        # most-trusted spelling wins wherever it appears, not whichever block is searched first.
+        obj = self.obj(hardwareUuid="00112233-4455-6677-8899-aabbccddeeff", biosUuid=self.BIOS)
+
+        assert domain.bios_uuid(obj)[0] == self.BIOS
+
+    def test_a_present_but_unusable_candidate_falls_through_to_the_next(self):
+        # A field published with null in it has told us nothing; a later alias may still carry
+        # the identifier. The same rule first_number follows for the storage-domain aliases.
+        obj = self.obj(biosUuid=None, hardwareUuid=self.BIOS)
+
+        assert domain.bios_uuid(obj) == (self.BIOS, "vCenterSummary.hardwareUuid")
+
+    def test_the_object_root_is_searched_as_well_as_the_vmware_block(self):
+        # 6.8-7.4 moves this field around; which block it lives in is not worth guessing wrong.
+        uuid, field = domain.bios_uuid({"id": 4001, "biosUuid": self.BIOS})
+
+        assert (uuid, field) == (self.BIOS, "biosUuid")
+
+    def test_the_instance_uuid_is_read_separately_and_from_object_uuid_last(self):
+        assert domain.instance_uuid({"uuid": self.INSTANCE}) == self.INSTANCE
+        assert domain.instance_uuid(self.obj(instanceUuid=self.INSTANCE)) == self.INSTANCE
+
+    def test_candidate_field_names_leave_as_names_and_never_as_values(self):
+        obj = self.obj(biosUuid=self.BIOS, instanceUuid=self.INSTANCE)
+
+        found = domain.candidate_uuid_fields(obj)
+
+        assert found == ("uuid", "vCenterSummary.biosUuid", "vCenterSummary.instanceUuid")
+        assert not any(self.BIOS in name or self.INSTANCE in name for name in found)
+
+    @pytest.mark.parametrize(
+        ("uuid", "suspect"),
+        [
+            ("50000000-1111-4222-8333-444444444401", True),
+            ("50000000-1111-2222-3333-444455556666", True),
+            ("42000000-1111-4222-8333-444444444401", False),
+            ("564d0000-aaaa-bbbb-cccc-ddddeeeeffff", False),
+            ("", False),
+        ],
+    )
+    def test_the_fifty_byte_marks_a_uuid_as_vcenters_not_the_firmwares(self, uuid, suspect):
+        assert domain.looks_like_instance_uuid(uuid) is suspect
+
+    def test_a_shape_verdict_separates_absent_from_present_but_wrong(self):
+        """Two different next steps, so they cannot share one answer.
+
+        `missing` means no candidate field exists and a NAME has to be added; anything else
+        means a candidate exists and its VALUE is the wrong shape.
+        """
+        assert domain.bios_uuid_verdict({"uuid": self.INSTANCE}) == domain.UUID_VERDICT_MISSING
+        assert (
+            domain.bios_uuid_verdict(self.obj(biosUuid="1234567890123456"))
+            == domain.UUID_VERDICT_NUMERIC
+        )
+
+    def test_the_parser_reports_which_field_won_and_what_was_available(self):
+        payload = {
+            "runs": [
+                {
+                    "id": "r-1",
+                    "objects": [
+                        {"object": self.obj(biosUuid=self.BIOS, instanceUuid=self.INSTANCE)}
+                    ],
+                }
+            ]
+        }
+
+        parsed = domain.parse_protected_object_links(payload, group_name="j")
+
+        assert parsed.bios_field == "vCenterSummary.biosUuid"
+        assert "vCenterSummary.biosUuid" in parsed.candidate_fields
+        assert parsed.links[0].uuid == self.BIOS
+        assert parsed.links[0].instance_uuid == self.INSTANCE
+        assert parsed.instance_shaped == 0
+
+    def test_an_object_with_only_an_instance_uuid_produces_no_link_at_all(self):
+        payload = {"runs": [{"id": "r-1", "objects": [{"object": {"uuid": self.INSTANCE}}]}]}
+
+        parsed = domain.parse_protected_object_links(payload)
+
+        assert parsed.links == ()
+        assert parsed.objects_seen == 1
+        # And the record says WHY, by name, so the next step is "add a field name" rather
+        # than "the join is impossible on this cluster".
+        assert parsed.candidate_fields == ("uuid",)
+
+    def test_a_bios_field_handing_back_fifty_uuids_is_counted_not_dropped(self):
+        # One real BIOS uuid in 256 starts 50 by chance, so rejecting on the byte would
+        # silently lose real hosts - the very failure mode this release exists to end. The
+        # RATIO is the evidence: all of them means the field name is wrong, one is chance.
+        payload = {
+            "runs": [
+                {
+                    "id": "r-1",
+                    "objects": [
+                        {"object": {"biosUuid": self.INSTANCE}},
+                        {"object": {"biosUuid": self.BIOS}},
+                    ],
+                }
+            ]
+        }
+
+        parsed = domain.parse_protected_object_links(payload)
+
+        assert len(parsed.links) == 2
+        assert parsed.instance_shaped == 1
+
+
+class TestTheBridgeMetricCarriesBothUuids:
+    def link(self, instance=""):
+        return domain.ProtectedObjectLink(
+            protection_group_id="1001_g-1",
+            protection_group_name="Nightly-VMware",
+            uuid=CANONICAL,
+            instance_uuid=instance,
+        )
+
+    def test_the_instance_uuid_rides_as_its_own_dimension(self):
+        # One dimension, not one series: it is 1:1 with the uuid already on the line, so it
+        # adds no cardinality - and it is the key a vCenter-side join would need later.
+        instance = "50000000-1111-4222-8333-444444444401"
+
+        sample = metrics.protected_object_samples(1001, "east", [self.link(instance)])[0]
+
+        assert sample.dimensions[metrics.DIM_OBJECT_UUID] == CANONICAL
+        assert sample.dimensions[metrics.DIM_OBJECT_INSTANCE_UUID] == instance
+
+    def test_the_join_key_dimension_keeps_its_name_so_the_contract_is_unchanged(self):
+        """Only what FILLS cohesity.object.uuid moved in v0.2.0, not what it is called.
+
+        The workflow, the pipeline and every query written against v0.1.9 still read the same
+        dimension; renaming it would have retired all of them in order to fix a value.
+        """
+        assert metrics.DIM_OBJECT_UUID == "cohesity.object.uuid"
+
+    def test_no_instance_uuid_omits_the_dimension_rather_than_sending_it_empty(self):
+        sample = metrics.protected_object_samples(1001, "east", [self.link()])[0]
+
+        assert metrics.DIM_OBJECT_INSTANCE_UUID not in sample.dimensions
+
+
 class TestVmwareSelection:
     @pytest.mark.parametrize(
         ("environment", "expected"),

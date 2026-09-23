@@ -5,7 +5,7 @@
     "source": "https://developers.cohesity.com/v1-cluster-7.4/reference/getprotectiongroupruns.md",
     "capturedAt": null,
     "clusterVersion": "7.4",
-    "warning": "SYNTHETIC, and thinner evidence than most. /v2/data-protect/protection-runs is not in the 7.3.2 reference this extension was written from at all - only the per-group /protection-groups/{id}/runs is - so this body is the per-group response shape used for both, which is exactly why domain.parse_run_list accepts either spelling of every field rather than trusting this file. Run ids MATCH the runs/summary fixture on purpose: the same run reported by two endpoints must be counted once, and that is only demonstrable if the ids agree. The objects[] arrays are the most invented part of this file: objects[].object is modelled straight from GetProtectionGroupRuns' ProtectionRunObject schema and NOBODY HAS SEEN IT ON A CLUSTER. That is precisely why the probe exists - do not read the uuid values here as evidence that a real cluster publishes BIOS UUIDs. The names are obvious placeholders so that a test asserting no object name ever reaches a diagnostic is asserting something."
+    "warning": "SYNTHETIC, and thinner evidence than most. /v2/data-protect/protection-runs is not in the 7.3.2 reference this extension was written from at all - only the per-group /protection-groups/{id}/runs is - so this body is the per-group response shape used for both, which is exactly why domain.parse_run_list accepts either spelling of every field rather than trusting this file. Run ids MATCH the runs/summary fixture on purpose: the same run reported by two endpoints must be counted once, and that is only demonstrable if the ids agree. The objects[] arrays are the most invented part of this file: objects[].object is modelled straight from GetProtectionGroupRuns' ProtectionRunObject schema and NOBODY HAS SEEN IT ON A CLUSTER. That is precisely why the probe exists - do not read the uuid values here as evidence that a real cluster publishes BIOS UUIDs. The uuid values were CORRECTED in v0.2.0 to model what the customer's cluster actually returns: objects[].object.uuid is vCenter's instanceUuid (50-prefixed, matches no Dynatrace HOST) and the BIOS UUID the join needs (42/564d-prefixed, what a HOST publishes as system.serial) sits under vCenterSummary. Both are carried here so that a test asserting the extension reads the BIOS one is asserting something a wrong implementation would fail. The names are obvious placeholders so that a test asserting no object name ever reaches a diagnostic is asserting something."
   },
   "body": {
     "totalRuns": 5,
@@ -38,11 +38,13 @@
               "sourceId": 3001,
               "environment": "kVMware",
               "objectType": "kVirtualMachine",
-              "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+              "uuid": "50000000-1111-4222-8333-444444444401",
               "globalId": "1234567890123456:4001",
               "vCenterSummary": {
                 "isCloudEnv": false,
-                "type": "kVCenter"
+                "type": "kVCenter",
+                "biosUuid": "00112233-4455-6677-8899-aabbccddeeff",
+                "instanceUuid": "50000000-1111-4222-8333-444444444401"
               }
             },
             "localSnapshotInfo": {
@@ -58,11 +60,13 @@
               "sourceId": 3001,
               "environment": "kVMware",
               "objectType": "kVirtualMachine",
-              "uuid": "421f9a3b-88c0-4f11-9d2e-6b7a10cc45ef",
+              "uuid": "50000000-1111-4222-8333-444444444402",
               "globalId": "1234567890123456:4002",
               "vCenterSummary": {
                 "isCloudEnv": false,
-                "type": "kVCenter"
+                "type": "kVCenter",
+                "biosUuid": "421f9a3b-88c0-4f11-9d2e-6b7a10cc45ef",
+                "instanceUuid": "50000000-1111-4222-8333-444444444402"
               }
             },
             "localSnapshotInfo": {

@@ -1,5 +1,5 @@
 name: custom:cohesity.storage
-version: 0.1.9
+version: 0.2.0
 # Floor settled by ticket 03 against the release-tagged schema repo, not guessed. The binding
 # constraint is documents.screens (1.341); openpipeline smartscape lands earlier, at 1.330.
 minDynatraceVersion: "1.341.0"
@@ -207,6 +207,13 @@ metrics:
       # host-link workflow, which turns it into the OpenPipeline lookup table that draws the
       # protection group -> HOST edge. Unit Count because the line protocol needs one, not
       # because counting these means anything.
+      #
+      # From 0.2.0 cohesity.object.uuid carries the VM's BIOS/SMBIOS uuid, which is what a
+      # HOST publishes as system.serial. Up to 0.1.9 it carried objects[].object.uuid, which
+      # is vCenter's instanceUuid - the same VM, a different identifier, and one no HOST
+      # anywhere reports. The dimension name is deliberately unchanged; only what fills it
+      # moved. cohesity.object.instance_uuid carries the instanceUuid alongside, for a
+      # vCenter-side join later and so the two can never be confused again.
       description: Always 1 - carries the VMware BIOS UUID of one object a protection group backs up, so it can be joined to a Dynatrace HOST
       unit: Count
   - key: cohesity.protectiongroup.last_success.age

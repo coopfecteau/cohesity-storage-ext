@@ -1644,7 +1644,26 @@ class TestHostLinkFanout:
             is_deleted=deleted,
         )
 
-    def run_body(self, *uuids):
+    def run_body(self, *uuids, instance=""):
+        """Objects carrying their BIOS uuid where a VMware object carries it.
+
+        Under `vCenterSummary`, which is the block the 7.3.2 reference documents and the one
+        the v0.1.8 probe saw on the customer's cluster - NOT under `object.uuid`, which is
+        vCenter's instanceUuid and is what v0.1.9 wrongly emitted.
+        """
+        objects = [
+            {
+                "object": {
+                    "id": 4000 + n,
+                    "vCenterSummary": {"biosUuid": uuid, "instanceUuid": instance},
+                }
+            }
+            for n, uuid in enumerate(uuids)
+        ]
+        return {"runs": [{"id": "r-1", "environment": "kVMware", "objects": objects}]}
+
+    def legacy_run_body(self, *uuids):
+        """What v0.1.9 read: an object carrying ONLY `uuid`, which is the instanceUuid."""
         objects = [{"object": {"id": 4000 + n, "uuid": uuid}} for n, uuid in enumerate(uuids)]
         return {"runs": [{"id": "r-1", "environment": "kVMware", "objects": objects}]}
 
@@ -1831,7 +1850,10 @@ class TestHostLinkFanout:
         assert fact["objects_linked"] == 0
         assert set(fact["verdicts"]) == {domain.UUID_VERDICT_NUMERIC, domain.UUID_VERDICT_MISSING}
         assert event["severity"] == metrics.SEVERITY_ERROR
-        assert "NOT POSSIBLE" in event["content"]
+        # A FIELD NAME answer, and it has to say so in those words - the other zero-edge
+        # outcome ("every object had a BIOS uuid, no host matched one") is a coverage answer
+        # and needs a completely different next step.
+        assert "FIELD NAME" in event["content"]
 
     def test_a_cluster_with_no_vmware_group_says_so_and_asks_nothing(self):
         groups = [self.group("g-sql", environment="kSQL")]
@@ -1855,6 +1877,120 @@ class TestHostLinkFanout:
 
         assert len(links) == 1
         assert self.fact(client)["groups_errored"] == 1
+
+    def test_the_instance_uuid_is_carried_beside_the_bios_uuid_not_instead_of_it(self):
+        groups = [self.group("g-1")]
+        instance = "50000000-1111-4222-8333-444444444401"
+        body = self.run_body("42000000-1111-4222-8333-444444444401", instance=instance)
+        transport = self.transport_for(groups, body)
+
+        links = client_with(transport, collect_host_link=True).protected_object_links(groups)
+
+        assert links[0].uuid == "42000000-1111-4222-8333-444444444401"
+        assert links[0].instance_uuid == instance
+
+    def test_an_object_carrying_only_object_uuid_yields_nothing(self):
+        """v0.1.9's bug, asserted as an absence.
+
+        `object.uuid` is vCenter's instanceUuid. Emitting it produced 200 series on the
+        customer's cluster that matched zero hosts and looked, from every diagnostic and every
+        chart, exactly like a working feature.
+        """
+        groups = [self.group("g-1")]
+        body = self.legacy_run_body("50000000-1111-4222-8333-444444444401")
+        transport = self.transport_for(groups, body)
+        client = client_with(transport, collect_host_link=True)
+
+        links = client.protected_object_links(groups)
+
+        assert links == []
+        assert self.fact(client)["candidates"] == ["uuid"]
+
+    def test_the_diagnostic_names_the_field_that_won_and_every_candidate_present(self):
+        # The same trick that settled the storage-domain field names: the cluster is asked
+        # what it publishes, and the answer leaves as NAMES on the diagnostics channel.
+        groups = [self.group("g-1")]
+        body = self.run_body(
+            "42000000-1111-4222-8333-444444444401",
+            instance="50000000-0000-0000-0000-000000000003",
+        )
+        transport = self.transport_for(groups, body)
+        client = client_with(transport, collect_host_link=True)
+
+        client.protected_object_links(groups)
+        fact = self.fact(client)
+        event = metrics.diagnostic_log_events("1", "prod", "7.4", [fact])[0]
+
+        assert fact["bios_field"] == "vCenterSummary.biosUuid"
+        assert fact["candidates"] == [
+            "vCenterSummary.biosUuid",
+            "vCenterSummary.instanceUuid",
+        ]
+        assert event["cohesity.host_link_bios_field"] == "vCenterSummary.biosUuid"
+        assert "vCenterSummary.biosUuid" in event["cohesity.host_link_uuid_candidates"]
+
+    def test_bios_uuids_are_counted_before_the_cap_so_coverage_stays_readable(self):
+        """"200 objects, 200 BIOS uuids" and "200 objects, 0 BIOS uuids" are different answers.
+
+        The first is a coverage question about which VMs run a OneAgent; the second is a
+        field-name question about this cluster's API. Counting the BIOS uuids after the
+        per-poll cap would truncate the first into looking like the second.
+        """
+        groups = [self.group("g-1")]
+        uuids = [f"42000000-0000-0000-0000-{n:012d}" for n in range(20)]
+        transport = self.transport_for(groups, self.run_body(*uuids))
+        client = client_with(transport, collect_host_link=True, max_host_link_objects=5)
+
+        client.protected_object_links(groups)
+        fact = self.fact(client)
+
+        assert fact["objects_seen"] == 20
+        assert fact["objects_bios"] == 20
+        assert fact["objects_linked"] == 5
+
+    def test_the_healthy_record_says_which_answer_a_zero_edge_join_would_be(self):
+        groups = [self.group("g-1")]
+        transport = self.transport_for(groups, self.run_body("42000000-1111-4222-8333-444444444401"))
+        client = client_with(transport, collect_host_link=True)
+
+        client.protected_object_links(groups)
+        event = metrics.diagnostic_log_events("1", "prod", "7.4", [self.fact(client)])[0]
+
+        assert event["severity"] == metrics.SEVERITY_INFO
+        assert "COVERAGE" in event["content"]
+        assert "vCenterSummary.biosUuid" in event["content"]
+
+    def test_uuids_shaped_like_an_instance_uuid_announce_themselves_once(self):
+        """The shape sanity check, and the reason it has its own marker.
+
+        A BIOS uuid starts 42 or 564d; vCenter's instanceUuid starts 50. If the field this
+        cluster calls a BIOS uuid hands back 50s, the outcome record would still read a
+        perfectly healthy "linked" - which is precisely how v0.1.9 shipped.
+        """
+        groups = [self.group("g-1")]
+        body = self.run_body("50000000-1111-4222-8333-444444444401")
+        transport = self.transport_for(groups, body)
+        client = client_with(transport, collect_host_link=True)
+
+        client.protected_object_links(groups)
+        facts = [item for item in client.take_diagnostics() if item["kind"] == "host_link"]
+        suspect = [item for item in facts if item.get("suspect")]
+        event = metrics.diagnostic_log_events("1", "prod", "7.4", suspect)[0]
+
+        assert len(suspect) == 1
+        assert suspect[0]["instance_shaped"] == 1
+        # ERROR because every one of them is 50-shaped: that is a wrong field name, not chance.
+        assert event["severity"] == metrics.SEVERITY_ERROR
+        assert "instanceUuid" in event["content"]
+
+    def test_a_clean_poll_raises_no_shape_warning_at_all(self):
+        groups = [self.group("g-1")]
+        transport = self.transport_for(groups, self.run_body("42000000-1111-4222-8333-444444444401"))
+        client = client_with(transport, collect_host_link=True)
+
+        client.protected_object_links(groups)
+
+        assert self.fact(client)["instance_shaped"] == 0
 
     def test_an_unexpected_failure_becomes_a_diagnostic_rather_than_an_exception(self):
         # An enrichment that could break the run collection would not be worth the edge.

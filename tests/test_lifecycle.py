@@ -203,7 +203,14 @@ class TestFailureDiagnostics:
         assert event["cohesity.object_vmware_key"] == "vCenterSummary"
         assert "uuid" in event["cohesity.object_fields"]
         assert event["cohesity.object_uuid_verdicts"].startswith("uuid-8-4-4-4-12")
-        assert "00112233-4455-6677-8899-aabbccddeeff" in event["cohesity.object_uuids"]
+        # The probe samples `object.uuid` verbatim, and what it finds there is vCenter's
+        # instanceUuid - well-formed, 50-prefixed, and matching no Dynatrace HOST. Asserting
+        # the 50 here rather than the BIOS uuid is the point: this record is what a reader
+        # compares against `system.serial` to see that the two are different identifiers.
+        assert "50000000-1111-4222-8333-444444444401" in event["cohesity.object_uuids"]
+        # And the field name that DOES carry the join key is visible in the same record, which
+        # is how the storage-domain aliases were settled and how this one was.
+        assert "biosUuid" in event["cohesity.object_vmware_fields"]
 
     def test_the_probe_never_carries_an_object_name(
         self, fresh_extension, cluster, monkeypatch
