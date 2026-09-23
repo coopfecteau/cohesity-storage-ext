@@ -52,7 +52,7 @@ from .errors import (
     CohesityFixtureError,
     error_facts,
 )
-from .transport import V1_PREFIX, Repeated, build_transport
+from .transport import API_PREFIX, V1_PREFIX, Repeated, build_transport
 
 # The one call that leaves the /v2 API. Cohesity's own community exporters read the cluster id
 # from here and pass it as the entityId on every cluster-level time-series call, which makes it
@@ -78,6 +78,14 @@ PROTECTION_RUNS_PATH = "/data-protect/runs/summary"
 # across polls rather than re-asking the same head of the list forever.
 PROTECTION_RUNS_LIST_PATH = "/data-protect/protection-runs"
 PROTECTION_GROUP_RUNS_PATH = "/data-protect/protection-groups/{group_id}/runs"
+
+# Alert paths, tried in this order. The v2 spelling is what the 7.4 reference documents; the v1
+# one is the path every Cohesity release in the 6.8-7.4 range has served. Neither is assumed -
+# see :meth:`CohesityClient.alerts`.
+ALERTS_PATH = "/alerts"
+V1_ALERTS_PATH = "/public/alerts"
+ALERTS_SOURCE_V2 = "v2/alerts"
+ALERTS_SOURCE_V1 = "public/alerts"
 
 #: Names for the three sources, used in diagnostics and as the cache key for the winner.
 RUNS_SOURCE_SUMMARY = "runs/summary"
@@ -366,6 +374,10 @@ class CohesityClient:
         # entityId probe wants every id the body happened to carry.
         self._cluster_status_payload: Any = None
         self._run_ledger = domain.RunLedger()
+        # Alerts get their own ledger rather than sharing the runs one. The keys could not
+        # collide, but an estate with thousands of runs would evict alerts out of a shared
+        # bound and re-send them - which is the one failure de-duplication exists to stop.
+        self._alert_ledger = domain.RunLedger()
         # entityId probe state. The candidate list is built once (it costs two extra requests);
         # the winner is cached per schema so every poll after the first makes one call each.
         self._entity_id_candidates: tuple[str, ...] | None = None
@@ -395,6 +407,9 @@ class CohesityClient:
         # caller. See :meth:`take_diagnostics`.
         self._diagnostics: list[dict[str, Any]] = []
         self._diagnosed: set[str] = set()
+        # Which alert path answered, remembered so the chain is walked once rather than
+        # every poll. Cleared implicitly by re-walking when the winner later fails.
+        self._alert_source = ""
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -1373,6 +1388,96 @@ class CohesityClient:
     def counted_run_ids(self) -> int:
         """How many run ids the dedup ledger is holding. For logging and for tests."""
         return len(self._run_ledger)
+
+    # -- alerts ------------------------------------------------------------
+
+    def alerts(self, *, lookback_hours: int = 24, max_alerts: int = 100) -> list[domain.Alert]:
+        """Open cluster alerts, from whichever alert path this cluster actually serves.
+
+        Two candidates, tried in order and remembered once one answers. This is the same shape
+        as the runs source chain and it exists for the same reason: the published reference
+        this extension was written from describes one API, the cluster in front of it serves
+        another, and the only reliable way to find out which is to ask. A 404 from the v2 path
+        is an ordinary answer here, not a fault.
+
+        The winner is cached for the life of the client but *not* permanently trusted - if it
+        later fails, the chain is re-walked. That is deliberate: this cluster has an
+        intermittently unhealthy stats subsystem, and a cached failure would turn a temporary
+        500 into a permanent silence that only a restart could clear.
+        """
+        window = self._alert_window(lookback_hours)
+        last_error: BaseException | None = None
+        for name, path, prefix in self._alert_sources():
+            params = dict(window)
+            params["maxAlerts"] = max_alerts
+            try:
+                payload = self._transport.get(path, params, prefix=prefix)
+            except CohesityError as exception:
+                last_error = exception
+                self._diagnose(
+                    f"alertSource:{name}",
+                    {
+                        "kind": "alert_source_failed",
+                        "source": name,
+                        "error": type(exception).__name__,
+                        "detail": str(exception),
+                    },
+                )
+                continue
+            if self._alert_source != name:
+                self._alert_source = name
+                self._diagnose(
+                    "alertSource",
+                    {"kind": "alert_source", "source": name, "path": f"{prefix}{path}"},
+                )
+            self._diagnose("alertShape", {"kind": "alert_shape", **domain.alert_shape(payload)})
+            return domain.parse_alerts(payload)
+        if last_error is not None:
+            raise last_error
+        return []
+
+    def _alert_sources(self) -> list[tuple[str, str, str]]:
+        """``(name, path, prefix)`` for each alert path, the remembered winner first."""
+        sources = [
+            (ALERTS_SOURCE_V2, ALERTS_PATH, API_PREFIX),
+            (ALERTS_SOURCE_V1, V1_ALERTS_PATH, V1_PREFIX),
+        ]
+        if self._alert_source:
+            sources.sort(key=lambda source: source[0] != self._alert_source)
+        return sources
+
+    def _alert_window(self, lookback_hours: int) -> dict[str, Any]:
+        """The time window, in the microsecond epochs every Cohesity time field uses.
+
+        Bounded rather than open-ended because an unfiltered alert list on a cluster with years
+        of history is a large response the extension would then throw almost all of away.
+        """
+        end = int(time.time() * 1_000_000)
+        start = end - max(1, lookback_hours) * 3_600 * 1_000_000
+        return {"startDateUsecs": start, "endDateUsecs": end}
+
+    @property
+    def alert_source(self) -> str:
+        """Which alert path answered, for the fastcheck line. Empty until one has."""
+        return self._alert_source
+
+    def new_alerts(self, *, lookback_hours: int = 24, max_alerts: int = 100) -> list[domain.Alert]:
+        """Alerts not seen before on this client.
+
+        The window has to be wider than the poll interval or an alert that fires just after a
+        poll is missed, which guarantees the same alert is returned several times - so the
+        ledger, not the window, is what stops it being re-sent. See :meth:`Alert.dedup_key` for
+        why a re-fire is a new record and a still-open alert is not.
+        """
+        return domain.new_alerts(
+            self.alerts(lookback_hours=lookback_hours, max_alerts=max_alerts),
+            self._alert_ledger,
+        )
+
+    @property
+    def counted_alert_ids(self) -> int:
+        """How many alert occurrences are being held against re-sending."""
+        return len(self._alert_ledger)
 
     # -- diagnostics -------------------------------------------------------
 

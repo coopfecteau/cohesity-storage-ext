@@ -1176,30 +1176,124 @@ def _number(value: Any) -> float | int | None:
     return None
 
 
+
+LOG_SOURCE_ALERTS = "cohesity_storage.alerts"
+
+#: How long an alert's prose may be before it is truncated. Cohesity help text runs to several
+#: paragraphs and the whole of it on every alert is ingest volume nobody reads. The number is
+#: generous enough to keep the first sentence, which is the one that says what broke.
+ALERT_TEXT_LIMIT = 1024
+
+#: Cluster severity -> the level the log pipeline filters on. "unknown" deliberately lands on
+#: WARN rather than INFO: a severity the extension could not read is a thing to look at, and
+#: burying it at INFO is how it would stay unlooked-at.
+_ALERT_LEVELS = {
+    domain.ALERT_SEVERITY_CRITICAL: SEVERITY_ERROR,
+    domain.ALERT_SEVERITY_WARNING: SEVERITY_WARN,
+    domain.ALERT_SEVERITY_INFO: SEVERITY_INFO,
+    domain.ALERT_SEVERITY_UNKNOWN: SEVERITY_WARN,
+}
+
+
+def alert_log_events(
+    cluster_id: str | int,
+    cluster_name: str,
+    alerts: list[domain.Alert],
+    *,
+    include_description: bool = True,
+) -> list[dict]:
+    """Turn cluster alerts into log records ready for ``report_log_events``.
+
+    Built here rather than in the client for the same reason samples are: the client deals in
+    what the cluster said, this module deals in what Dynatrace is told.
+
+    ``include_description`` is the redaction switch. The alert prose is the one field that can
+    carry a name from the protected estate - a datastore, a share, occasionally a VM - and
+    whether that should cross into Dynatrace is a decision for whoever owns the data, not a
+    default this extension gets to pick. Everything else here describes the cluster itself.
+    """
+    common = {
+        "log.source": LOG_SOURCE_ALERTS,
+        DIM_CLUSTER_ID: str(cluster_id),
+        DIM_CLUSTER_NAME: cluster_name,
+    }
+    events = []
+    for alert in alerts:
+        event = {
+            **common,
+            "severity": _ALERT_LEVELS.get(alert.severity, SEVERITY_WARN),
+            "content": _alert_content(alert, include_description=include_description),
+            "cohesity.alert.id": alert.id,
+            "cohesity.alert.name": _alert_text(alert.name),
+            "cohesity.alert.severity": alert.severity,
+            "cohesity.alert.category": alert.category,
+            "cohesity.alert.state": alert.state,
+        }
+        if alert.severity_source:
+            # Only when the mapping failed. This is the field that turns "why is everything
+            # unknown" into an answer without another deploy.
+            event["cohesity.alert.severity_source"] = _alert_text(alert.severity_source)
+        if include_description and alert.description:
+            event["cohesity.alert.description"] = _alert_text(alert.description)
+        # The cluster's own clock, carried as an attribute rather than used as the record's
+        # timestamp. Ingest rejects anything more than an hour old, and an alert that has been
+        # open for a week is both perfectly valid and far outside that window - using it would
+        # make exactly the oldest, most serious alerts vanish without a word. The record is
+        # timestamped when it was observed; these say when it actually happened.
+        if alert.latest_timestamp_usecs is not None:
+            event["cohesity.alert.latest_timestamp_usecs"] = str(alert.latest_timestamp_usecs)
+        if alert.first_timestamp_usecs is not None:
+            event["cohesity.alert.first_timestamp_usecs"] = str(alert.first_timestamp_usecs)
+        events.append(event)
+    return events
+
+
+def _alert_content(alert: domain.Alert, *, include_description: bool) -> str:
+    """The one-line sentence a human reads in the log viewer."""
+    head = f"Cohesity {alert.severity} alert: {alert.name}"
+    if include_description and alert.description:
+        return _alert_text(f"{head} - {alert.description}")
+    return _alert_text(head)
+
+
+def _alert_text(value: str) -> str:
+    """Collapse whitespace and truncate, the same discipline the dimensions get.
+
+    Alert prose is free-form cluster output: it arrives with newlines, tabs and runs of spaces,
+    and a multi-line log record is one that reads badly everywhere it is shown.
+    """
+    collapsed = " ".join(str(value).split())
+    if len(collapsed) <= ALERT_TEXT_LIMIT:
+        return collapsed
+    return collapsed[: ALERT_TEXT_LIMIT - 1] + "…"
+
 __all__ = [
+    "ALERT_TEXT_LIMIT",
     "ALL_METRIC_KEYS",
-    "PROTECTION_GROUP_PROTECTS",
     "CLUSTER_TIME_SERIES_MAP",
     "DIMENSION_VALUE_MAX_CHARS",
+    "LOG_SOURCE_ALERTS",
     "LOG_SOURCE_DIAGNOSTICS",
     "MAX_DIAGNOSTIC_FIELDS",
     "PREFIX_CLUSTER",
     "PREFIX_PROTECTION_GROUP",
     "PREFIX_STORAGE_DOMAIN",
+    "PROTECTION_GROUP_PROTECTS",
     "SEVERITY_ERROR",
     "SEVERITY_INFO",
     "SEVERITY_WARN",
-    "VIEW_METRIC_OPERATIONS",
     "Sample",
+    "VIEW_METRIC_OPERATIONS",
+    "alert_log_events",
+    "clean_dimension_value",
     "cluster_dimensions",
     "cluster_storage_samples",
-    "clean_dimension_value",
     "cluster_time_series_samples",
     "diagnostic_log_events",
     "entity_id",
     "escape_dimension_value",
-    "protection_group_dimensions",
     "protected_object_samples",
+    "protection_group_dimensions",
     "protection_group_samples",
     "protection_run_samples",
     "storage_domain_dimensions",

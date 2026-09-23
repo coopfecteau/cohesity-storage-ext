@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -1429,22 +1430,244 @@ def _sequence(payload: Any, key: str) -> list:
 
 
 # Re-exported so the metric layer can namespace ids without importing the whole domain module.
+# ---------------------------------------------------------------------------
+# Alerts
+#
+# The cluster's own health events - node down, disk failing, capacity threshold crossed. Read
+# as log records rather than metrics because they are discrete, carry prose, and are exactly
+# what "why did the backup estate degrade at 03:00" wants to see beside the metrics.
+#
+# Sensitivity, decided deliberately: these describe the CLUSTER, not the data it holds. No
+# usernames, no source addresses, no backup content. That is what separates them from the audit
+# log, which carries all three and is a decision with a data-protection dimension rather than a
+# technical one. Nothing here reaches into a protected object.
+# ---------------------------------------------------------------------------
+
+#: Severity as the cluster spells it, mapped to the vocabulary the rest of the extension uses.
+#: Anything unrecognised becomes "unknown" rather than being dropped or guessed at - the same
+#: rule the dimensions follow, and for the same reason: an absent value cannot be counted.
+ALERT_SEVERITY_CRITICAL = "critical"
+ALERT_SEVERITY_WARNING = "warning"
+ALERT_SEVERITY_INFO = "info"
+ALERT_SEVERITY_UNKNOWN = "unknown"
+
+_ALERT_SEVERITIES = {
+    "kcritical": ALERT_SEVERITY_CRITICAL,
+    "critical": ALERT_SEVERITY_CRITICAL,
+    "kwarning": ALERT_SEVERITY_WARNING,
+    "warning": ALERT_SEVERITY_WARNING,
+    "kinfo": ALERT_SEVERITY_INFO,
+    "info": ALERT_SEVERITY_INFO,
+    "kinformational": ALERT_SEVERITY_INFO,
+}
+
+#: Where the id can live. "id" is what the published 7.3.2 model returns; the others are
+#: spellings seen across the 6.8-7.4 range and cost nothing to tolerate.
+ALERT_ID_FIELDS = ("id", "alertId", "alertUid")
+#: The human sentence. alertDocument is a nested block on v1; the flat spellings are v2.
+ALERT_NAME_FIELDS = ("alertName", "name", "alertCode", "alertType")
+ALERT_DESCRIPTION_FIELDS = ("alertDescription", "description", "message", "alertCause")
+#: Microsecond epochs. The latest one decides identity - see :func:`new_alerts`.
+ALERT_LATEST_TIME_FIELDS = ("latestTimestampUsecs", "timestampUsecs", "lastOccurrenceTimeUsecs")
+ALERT_FIRST_TIME_FIELDS = ("firstTimestampUsecs", "firstOccurrenceTimeUsecs")
+#: Blocks the sentence fields may be nested under, searched after the object root.
+ALERT_NESTED_BLOCKS = ("alertDocument", "alertDetails")
+
+
+@dataclass(frozen=True)
+class Alert:
+    """One cluster alert, reduced to the fields that survive a version change."""
+
+    id: str
+    name: str
+    description: str
+    severity: str
+    category: str
+    state: str
+    latest_timestamp_usecs: int | None = None
+    first_timestamp_usecs: int | None = None
+    #: Raw severity exactly as the cluster spelled it, kept only when it did not map. It is the
+    #: one thing that would explain a pile of "unknown" without another deploy.
+    severity_source: str = ""
+
+    @property
+    def dedup_key(self) -> str:
+        """What makes this alert *this occurrence* of itself.
+
+        The id alone is not enough. An alert that fires, resolves and fires again keeps its id,
+        and de-duplicating on the id would silently swallow the second fire - the one somebody
+        is being paged about. The latest-occurrence timestamp is what moves, so the pair is the
+        identity.
+        """
+        return f"{self.id}:{self.latest_timestamp_usecs or 0}"
+
+
+def alert_severity(raw: Any) -> tuple[str, str]:
+    """Normalise a cluster severity, and say what it was when it did not map.
+
+    Returns ``(severity, severity_source)``. The source is empty when the mapping succeeded,
+    because repeating a value already carried in the severity field teaches nobody anything.
+    """
+    text = _text(raw)
+    mapped = _ALERT_SEVERITIES.get(text.strip().lower())
+    if mapped:
+        return mapped, ""
+    return ALERT_SEVERITY_UNKNOWN, text
+
+
+def _alert_field(payload: Mapping[str, Any], names: tuple[str, ...]) -> str:
+    """First non-empty of ``names``, searched at the root then inside the nested blocks.
+
+    Name-first rather than block-first, for the same reason ``first_number`` is: the flat
+    spelling is the one the newer versions use, and a cluster carrying both should be read as
+    the newer one.
+    """
+    for name in names:
+        value = _text(payload.get(name))
+        if value:
+            return value
+        for block_name in ALERT_NESTED_BLOCKS:
+            block = payload.get(block_name)
+            if isinstance(block, Mapping):
+                value = _text(block.get(name))
+                if value:
+                    return value
+    return ""
+
+
+def parse_alert(payload: Any) -> Alert | None:
+    """One alert, or None when it carries no id.
+
+    An alert that cannot be de-duplicated is worse than no alert: it would be re-sent on every
+    poll for as long as it stayed open.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    identifier = _alert_field(payload, ALERT_ID_FIELDS)
+    if not identifier:
+        return None
+    severity, severity_source = alert_severity(
+        payload.get("severity") if payload.get("severity") is not None else payload.get("alertSeverity")
+    )
+    return Alert(
+        id=identifier,
+        name=_alert_field(payload, ALERT_NAME_FIELDS) or "unnamed",
+        description=_alert_field(payload, ALERT_DESCRIPTION_FIELDS),
+        severity=severity,
+        severity_source=severity_source,
+        # "unknown" rather than "", for the reason every other dimension avoids empty: a blank
+        # category cannot be filtered for, and these are the ones worth finding.
+        category=_alert_field(payload, ("alertCategory", "category")) or "unknown",
+        state=_alert_field(payload, ("alertState", "state", "resolutionStatus")) or "unknown",
+        latest_timestamp_usecs=first_number(payload, ALERT_LATEST_TIME_FIELDS),
+        first_timestamp_usecs=first_number(payload, ALERT_FIRST_TIME_FIELDS),
+    )
+
+
+def parse_alerts(payload: Any) -> list[Alert]:
+    """Every readable alert in a response body, tolerating both shapes the API returns.
+
+    A bare list is what the v1 path answers; the wrapped forms are what the v2 paths use. An
+    unreadable entry is skipped rather than raising - one malformed alert must not cost the
+    other ninety-nine.
+    """
+    entries: Any = payload
+    if isinstance(payload, Mapping):
+        entries = []
+        for key in ("alerts", "alertList", "results"):
+            if isinstance(payload.get(key), list):
+                entries = payload[key]
+                break
+    if not isinstance(entries, list):
+        return []
+    alerts = []
+    for entry in entries:
+        alert = parse_alert(entry)
+        if alert is not None:
+            alerts.append(alert)
+    return alerts
+
+
+def new_alerts(alerts: list[Alert], ledger: RunLedger) -> list[Alert]:
+    """The alerts not reported before, in the order they arrived.
+
+    Shares :class:`RunLedger` with protection runs rather than repeating it: the requirement is
+    identical - a bounded set that survives months of polling - and the keys cannot collide,
+    because an alert key carries a timestamp suffix a run id never has.
+    """
+    fresh = []
+    for alert in alerts:
+        if ledger.claim(alert.dedup_key):
+            fresh.append(alert)
+    return fresh
+
+
+def alert_shape(payload: Any) -> dict[str, Any]:
+    """What an alert response looks like, in names and counts only - never in content.
+
+    Names only is not a stylistic choice here. The open question about alert ingest is whether
+    the prose fields carry object names from the protected estate, and a diagnostic that
+    answered it by quoting one would be the leak it was written to detect. The counts say
+    whether descriptions exist; a human decides whether to ingest them.
+    """
+    alerts = parse_alerts(payload)
+    entries: Any = payload
+    if isinstance(payload, Mapping):
+        entries = []
+        for key in ("alerts", "alertList", "results"):
+            if isinstance(payload.get(key), list):
+                entries = payload[key]
+                break
+    keys: list[str] = []
+    if isinstance(entries, list) and entries and isinstance(entries[0], Mapping):
+        keys = sorted(str(key) for key in entries[0])
+    return {
+        "count": len(alerts),
+        "keys": keys,
+        "severities": sorted({alert.severity for alert in alerts}),
+        "unmapped": sorted({a.severity_source for a in alerts if a.severity_source}),
+        "with_description": sum(1 for alert in alerts if alert.description),
+    }
+
 __all__ = [
+    "ALERT_DESCRIPTION_FIELDS",
+    "ALERT_FIRST_TIME_FIELDS",
+    "ALERT_ID_FIELDS",
+    "ALERT_LATEST_TIME_FIELDS",
+    "ALERT_NAME_FIELDS",
+    "ALERT_NESTED_BLOCKS",
+    "ALERT_SEVERITY_CRITICAL",
+    "ALERT_SEVERITY_INFO",
+    "ALERT_SEVERITY_UNKNOWN",
+    "ALERT_SEVERITY_WARNING",
+    "Alert",
     "BIOS_UUID_FIELDS",
     "CLUSTER_ALTERNATE_ID_FIELDS",
     "CLUSTER_ID_FIELDS",
+    "ClusterStatus",
+    "ClusterStorage",
+    "DataPoint",
     "INSTANCE_UUID_BYTE",
     "INSTANCE_UUID_FIELDS",
-    "NON_TERMINAL_RUN_STATUSES",
     "MAX_UUID_SAMPLES",
+    "NON_TERMINAL_RUN_STATUSES",
+    "ProtectedObjectLink",
+    "ProtectedObjectLinks",
+    "ProtectedObjectShape",
+    "ProtectionGroup",
+    "ProtectionRun",
     "RUN_ALTERNATE_BACKUP_KEYS",
     "RUN_LIST_KEYS",
     "RUN_STATUS_UNKNOWN",
     "RUN_TARGET_RESULT_KEYS",
+    "RunLedger",
     "STORAGE_DOMAIN_LOGICAL_FIELDS",
     "STORAGE_DOMAIN_PHYSICAL_FIELDS",
     "STORAGE_DOMAIN_RESILIENCY_FIELDS",
     "SUCCESSFUL_RUN_STATUSES",
+    "SchemaRef",
+    "StorageDomain",
+    "TimeSeriesMetric",
     "UUID_VERDICT_CANONICAL",
     "UUID_VERDICT_HEX32",
     "UUID_VERDICT_MISSING",
@@ -1454,19 +1677,9 @@ __all__ = [
     "VMWARE_ENVIRONMENT_HINT",
     "VMWARE_OBJECT_BLOCKS",
     "VMWARE_SUMMARY_HINTS",
-    "ClusterStatus",
-    "ClusterStorage",
-    "DataPoint",
-    "ProtectedObjectLink",
-    "ProtectedObjectLinks",
-    "ProtectedObjectShape",
-    "ProtectionGroup",
-    "ProtectionRun",
-    "RunLedger",
-    "SchemaRef",
-    "StorageDomain",
-    "TimeSeriesMetric",
     "ViewStats",
+    "alert_severity",
+    "alert_shape",
     "bios_uuid",
     "bios_uuid_verdict",
     "candidate_uuid_fields",
@@ -1476,9 +1689,12 @@ __all__ = [
     "is_vmware_environment",
     "looks_like_instance_uuid",
     "namespace_id",
+    "new_alerts",
     "new_terminal_runs",
     "normalise_object_uuid",
     "ordered_unique",
+    "parse_alert",
+    "parse_alerts",
     "parse_cluster_status",
     "parse_cluster_storage",
     "parse_data_point",

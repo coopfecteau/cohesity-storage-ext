@@ -1272,6 +1272,7 @@ class TestReplayAgainstShippedFixtures:
         # is pointed at directly rather than left as the one shipped body nothing exercises.
         client._runs_source = client_module.RUNS_SOURCE_LIST
         client.protection_runs()
+        client.alerts()
 
         served = {fixture.key for fixture in client._transport.served}
         shipped = set(FixtureStore(FIXTURE_DIR).fixture_keys())

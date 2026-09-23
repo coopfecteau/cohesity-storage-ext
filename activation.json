@@ -50,7 +50,8 @@
         "intervalMinutes": 1,
         "requestTimeoutSeconds": 30,
         "maxRunFanoutGroups": 20,
-        "maxHostLinkObjects": 200
+        "maxHostLinkObjects": 200,
+        "collectAlerts": true
       }
     ]
   }

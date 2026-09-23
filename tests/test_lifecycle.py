@@ -19,6 +19,7 @@ from cohesity_storage import metrics
 from cohesity_storage.__main__ import EXTENSION_NAME, ExtensionImpl
 from cohesity_storage.client import MAX_VARIANT_REQUESTS_PER_POLL, RUNS_WINDOW_OVERLAP_SECONDS
 from cohesity_storage.config import load_clusters
+from cohesity_storage.errors import CohesityApiError
 from cohesity_storage.fixtures import FixtureStore
 from tests.cohesity_fake_cluster import FakeCohesityCluster, self_signed_certificate
 
@@ -470,3 +471,113 @@ class TestFailureDiagnostics:
         query = parse_qs(urlparse(runs[0]).query)
         window = (int(query["endTimeUsecs"][0]) - int(query["startTimeUsecs"][0])) / 1_000_000
         assert window == pytest.approx(5 * 60 + RUNS_WINDOW_OVERLAP_SECONDS, abs=2)
+
+
+class TestAlertSection:
+    """Alerts as the SDK actually drives them.
+
+    Written against the poll rather than the collector because the one bug that reached a real
+    ActiveGate was wiring, not logic: the collector was correct and never reached.
+    """
+
+    def alert_endpoint(self, **overrides) -> dict:
+        endpoint = replay_endpoint()
+        endpoint["collectAlerts"] = True
+        endpoint.update(overrides)
+        return endpoint
+
+    def alert_events(self, events: list[list[dict]]) -> list[dict]:
+        return [
+            record
+            for batch in events
+            for record in batch
+            if record.get("log.source") == metrics.LOG_SOURCE_ALERTS
+        ]
+
+    def test_the_section_does_not_run_until_it_is_switched_on(self, fresh_extension, monkeypatch):
+        # Off by default, and the default is what a tenant gets before anybody has decided
+        # whether alert prose may cross into Dynatrace.
+        _, events = polling_extension(fresh_extension, monkeypatch)
+        config = load_clusters(fresh_extension.activation_config)[0][0]
+
+        fresh_extension._poll(config)
+
+        assert self.alert_events(events) == []
+
+    def test_switching_it_on_produces_alert_records(self, fresh_extension, monkeypatch):
+        _, events = polling_extension(fresh_extension, monkeypatch, self.alert_endpoint())
+        config = load_clusters(fresh_extension.activation_config)[0][0]
+
+        fresh_extension._poll(config)
+
+        records = self.alert_events(events)
+        assert len(records) == 4
+        assert {record["cohesity.alert.severity"] for record in records} == {
+            "critical",
+            "warning",
+            "info",
+            "unknown",
+        }
+
+    def test_an_alert_is_not_re_sent_on_the_next_poll(self, fresh_extension, monkeypatch):
+        # The window is wider than the interval on purpose, so the cluster returns the same
+        # open alerts every time. Without the ledger this would be four records per poll,
+        # forever.
+        _, events = polling_extension(fresh_extension, monkeypatch, self.alert_endpoint())
+        config = load_clusters(fresh_extension.activation_config)[0][0]
+
+        fresh_extension._poll(config)
+        fresh_extension._poll(config)
+        fresh_extension._poll(config)
+
+        assert len(self.alert_events(events)) == 4
+
+    def test_the_records_carry_the_cluster_identity(self, fresh_extension, monkeypatch):
+        _, events = polling_extension(fresh_extension, monkeypatch, self.alert_endpoint())
+        config = load_clusters(fresh_extension.activation_config)[0][0]
+
+        fresh_extension._poll(config)
+
+        for record in self.alert_events(events):
+            assert record[metrics.DIM_CLUSTER_ID]
+            assert record[metrics.DIM_CLUSTER_NAME]
+
+    def test_withholding_descriptions_is_honoured_end_to_end(self, fresh_extension, monkeypatch):
+        # The switch is only worth having if it survives the whole path from the monitoring
+        # configuration to the record.
+        _, events = polling_extension(
+            fresh_extension, monkeypatch, self.alert_endpoint(alertDescriptions=False)
+        )
+        config = load_clusters(fresh_extension.activation_config)[0][0]
+
+        fresh_extension._poll(config)
+
+        records = self.alert_events(events)
+        assert records
+        for record in records:
+            assert "cohesity.alert.description" not in record
+
+    def test_a_failing_alert_section_does_not_cost_the_metrics(self, fresh_extension, monkeypatch):
+        # Every section is independent. Alerts are the newest and least proven of them, and a
+        # cluster that will not serve them must not take the capacity numbers down with it.
+        samples, events = polling_extension(fresh_extension, monkeypatch, self.alert_endpoint())
+        config = load_clusters(fresh_extension.activation_config)[0][0]
+        client = fresh_extension._client_for(config)
+
+        def refuse(**_):
+            raise CohesityApiError("HTTP 403 - the key lacks the alert privilege")
+
+        monkeypatch.setattr(client, "new_alerts", refuse)
+        fresh_extension._poll(config)
+
+        assert samples, "the metric sections should still have reported"
+        assert self.alert_events(events) == []
+        # ...and the reason has to leave the ActiveGate, because the extension's own log lines
+        # do not reach Grail on the tenant this was debugged against.
+        failures = [
+            record
+            for batch in events
+            for record in batch
+            if "alerts" in str(record.get("content", ""))
+        ]
+        assert failures, "a refused alert section must say so over log ingest"

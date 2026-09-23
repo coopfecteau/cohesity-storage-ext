@@ -241,6 +241,48 @@
             }
           ],
           "maxItems": 1
+        },
+        "collectAlerts": {
+          "displayName": "Collect cluster alerts as logs",
+          "description": "Off by default. When on, the extension sends the cluster's own health alerts - node, disk, capacity and similar - to Dynatrace as log records under the source cohesity_storage.alerts, de-duplicated so a still-open alert is not re-sent every poll. These describe the CLUSTER, not the data it protects: no usernames, no source addresses and no backup content. The one field that can name something in the protected estate is the free-form description, which has its own switch below.",
+          "type": "boolean",
+          "nullable": true,
+          "maxItems": 1
+        },
+        "alertDescriptions": {
+          "displayName": "Include alert descriptions",
+          "description": "On by default, and only consulted when alerts are collected. The description is the sentence that says what actually broke, and it is also the only alert field that can contain a name from the protected estate - a datastore, a share, occasionally a VM. Turn it off to keep the alert and drop the sentence: id, name, severity, category, state and timestamps are all still sent.",
+          "type": "boolean",
+          "nullable": true,
+          "maxItems": 1
+        },
+        "alertLookbackHours": {
+          "displayName": "Alert lookback (hours)",
+          "description": "How far back each poll asks for alerts. Wider than the poll interval on purpose, so an alert raised just after a poll is not missed; the de-duplication ledger, not this window, is what stops an alert being sent twice. Raise it after an outage to backfill.",
+          "type": "integer",
+          "nullable": true,
+          "constraints": [
+            {
+              "type": "RANGE",
+              "minimum": 1,
+              "maximum": 168
+            }
+          ],
+          "maxItems": 1
+        },
+        "maxAlerts": {
+          "displayName": "Maximum alerts per poll",
+          "description": "A ceiling on how many alerts one poll will read. A cluster in a bad state can raise a great many at once, and this bounds what that costs in ingest.",
+          "type": "integer",
+          "nullable": true,
+          "constraints": [
+            {
+              "type": "RANGE",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          ],
+          "maxItems": 1
         }
       }
     },

@@ -1,0 +1,67 @@
+{
+  "_fixture": {
+    "provenance": "synthetic",
+    "description": "Cluster health alerts. Drives the alert log-event collection: severity mapping, the nested-vs-flat sentence fields, de-duplication keys and the no-id skip path.",
+    "source": "https://developers.cohesity.com/v1-cluster-7.4/reference/getalerts.md",
+    "capturedAt": null,
+    "clusterVersion": "7.4",
+    "warning": "SYNTHETIC. Hand-written from the published response schema, never seen on a cluster. Field names are doc-derived; every value is invented. Which alert path a real cluster serves, and what it actually calls these fields, is the question the alert_source and alert_shape diagnostics were added to answer - do not treat this file as evidence about either."
+  },
+  "body": {
+    "alerts": [
+      {
+        "id": "alert-1001",
+        "alertCode": "CE00512010",
+        "alertCategory": "kDisk",
+        "alertState": "kOpen",
+        "severity": "kCritical",
+        "firstTimestampUsecs": 1789200000000000,
+        "latestTimestampUsecs": 1789203600000000,
+        "alertDocument": {
+          "alertName": "Disk health critical",
+          "alertDescription": "Disk   7 on node 2 reported   media errors\nand has been taken offline.",
+          "alertCause": "The disk reported uncorrectable media errors."
+        }
+      },
+      {
+        "id": "alert-1002",
+        "alertCode": "CE00301004",
+        "alertCategory": "kCluster",
+        "alertState": "kOpen",
+        "severity": "kWarning",
+        "firstTimestampUsecs": 1789180000000000,
+        "latestTimestampUsecs": 1789202000000000,
+        "alertDocument": {
+          "alertName": "Cluster storage utilization high",
+          "alertDescription": "Cluster storage is above the configured threshold."
+        }
+      },
+      {
+        "id": "alert-1003",
+        "alertCategory": "kNode",
+        "alertState": "kResolved",
+        "severity": "kInfo",
+        "latestTimestampUsecs": 1789201000000000,
+        "alertName": "Node rejoined the cluster",
+        "alertDescription": "Node 3 completed a rolling upgrade and rejoined."
+      },
+      {
+        "id": "alert-1004",
+        "alertCategory": "kSoftware",
+        "alertState": "kOpen",
+        "severity": "kSomethingNew",
+        "latestTimestampUsecs": 1789202500000000,
+        "alertName": "Unrecognised severity, deliberately",
+        "alertDescription": "Exercises the unknown-severity path: a severity the extension cannot map is reported as unknown at WARN, never dropped."
+      },
+      {
+        "alertCategory": "kDisk",
+        "alertState": "kOpen",
+        "severity": "kCritical",
+        "latestTimestampUsecs": 1789202600000000,
+        "alertName": "No id, deliberately",
+        "alertDescription": "Exercises the skip path: an alert with no id cannot be de-duplicated, so it is dropped rather than re-sent on every poll."
+      }
+    ]
+  }
+}

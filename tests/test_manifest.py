@@ -138,8 +138,14 @@ class TestManifest:
         endpoint = activation_schema["types"][
             "dynatrace.datasource.python:cohesity-cluster-endpoint"
         ]["properties"]
+        # Alerts are the exception, and a deliberate one: feature sets gate METRICS, and the
+        # alert collection emits log records. There is no metric to list, so there is no
+        # feature set to mirror - its only switch is the toggle itself.
+        log_only = {"collectAlerts"}
         toggles = {
-            name for name in endpoint if name.startswith("collect")
+            name
+            for name in endpoint
+            if name.startswith("collect") and name not in log_only
         }
 
         expected = {f"collect{''.join(part.title() for part in name.split('_'))}" for name in feature_sets}

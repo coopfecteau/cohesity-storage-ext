@@ -19,6 +19,7 @@ is a support call nobody can answer.
 from __future__ import annotations
 
 import time
+from functools import partial
 
 from dynatrace_extension import Extension, MetricType, Status, StatusValue
 
@@ -147,6 +148,10 @@ class ExtensionImpl(Extension):
             ("storage domains", self._report_storage_domains, config.collect_storage_domains),
             ("views", self._report_views, config.collect_views),
             ("protection", self._report_protection, config.collect_protection),
+            # Last, and carrying the config rather than just the ids: alerts are the only
+            # section whose payload is prose, so it is the only one that needs to know
+            # whether the operator agreed to send it.
+            ("alerts", partial(self._report_alerts, config=config), config.collect_alerts),
         ]
         for label, collect, enabled in sections:
             if enabled:
@@ -382,6 +387,49 @@ class ExtensionImpl(Extension):
         self._emit(metrics.CLUSTER_COLLECTION_SUCCESS, 0, dimensions)
 
     # -- scheduling --------------------------------------------------------
+
+    def _report_alerts(
+        self,
+        client: CohesityClient,
+        cluster_id: str,
+        cluster_name: str,
+        *,
+        config: ClusterConfig,
+    ) -> None:
+        """Send the cluster's own health alerts over log ingest.
+
+        Log events rather than metrics because an alert is a discrete thing that happened and
+        carries a sentence. A metric could count them, which is worth having later, but it
+        cannot say a disk in node 2 is failing - and that sentence is the reason to collect
+        these at all.
+
+        The same channel the diagnostics use, which is what makes this cheap: that path is
+        already proven to reach Grail from the ActiveGate on a tenant where the extension's own
+        log lines do not.
+        """
+        alerts = client.new_alerts(
+            lookback_hours=config.alert_lookback_hours, max_alerts=config.max_alerts
+        )
+        if not alerts:
+            return
+        events = metrics.alert_log_events(
+            cluster_id,
+            cluster_name,
+            alerts,
+            include_description=config.alert_descriptions,
+        )
+        if events:
+            self.report_log_events(events)
+        by_severity: dict[str, int] = {}
+        for alert in alerts:
+            by_severity[alert.severity] = by_severity.get(alert.severity, 0) + 1
+        self.logger.info(
+            f"{cluster_name}: {len(alerts)} new alert(s) "
+            f"({', '.join(f'{name}:{count}' for name, count in sorted(by_severity.items()))}); "
+            f"read from {client.alert_source or 'no endpoint'}; "
+            f"{client.counted_alert_ids} occurrence(s) held against re-sending"
+            f"{'' if config.alert_descriptions else '; descriptions withheld by configuration'}"
+        )
 
     def _client_for(self, config: ClusterConfig) -> CohesityClient:
         self._ensure_state()

@@ -96,6 +96,17 @@ DEFAULT_COLLECT_HOST_LINK = False
 # than quietly publishing half a mapping.
 DEFAULT_HOST_LINK_OBJECTS = 200
 
+# Alerts are OFF until asked for. Not because they are expensive - they are cheap - but
+# because they are the first thing this extension sends that is prose written by the
+# cluster rather than a number it measured, and prose is the only thing that could carry a
+# name out of the protected estate. Opting in is the point at which somebody has decided
+# that is acceptable. DEFAULT_ALERT_DESCRIPTIONS is the narrower switch for the one field
+# that can carry such a name.
+DEFAULT_COLLECT_ALERTS = False
+DEFAULT_ALERT_DESCRIPTIONS = True
+DEFAULT_ALERT_LOOKBACK_HOURS = 24
+DEFAULT_MAX_ALERTS = 100
+
 DEFAULTS = {
     "port": 443,
     "useCredentialVault": False,
@@ -108,6 +119,10 @@ DEFAULTS = {
     "requestTimeoutSeconds": 30,
     "maxRunFanoutGroups": DEFAULT_RUNS_FANOUT_GROUPS,
     "maxHostLinkObjects": DEFAULT_HOST_LINK_OBJECTS,
+    "collectAlerts": DEFAULT_COLLECT_ALERTS,
+    "alertDescriptions": DEFAULT_ALERT_DESCRIPTIONS,
+    "alertLookbackHours": DEFAULT_ALERT_LOOKBACK_HOURS,
+    "maxAlerts": DEFAULT_MAX_ALERTS,
     "fixtureDir": "",
 }
 
@@ -155,6 +170,14 @@ class ClusterConfig:
     # diagnostic, never silent: half a lookup table is indistinguishable from half an
     # estate going unprotected, and nothing else in the product would say which it was.
     max_host_link_objects: int = DEFAULT_HOST_LINK_OBJECTS
+    # Cluster alerts as log events. See DEFAULT_COLLECT_ALERTS for why this is opt-in.
+    collect_alerts: bool = DEFAULT_COLLECT_ALERTS
+    # The redaction switch. Off means the alert still arrives - id, name, severity,
+    # category, state, timestamps - without the free-form sentence, which is the only
+    # field that can name a datastore, a share or a VM.
+    alert_descriptions: bool = DEFAULT_ALERT_DESCRIPTIONS
+    alert_lookback_hours: int = DEFAULT_ALERT_LOOKBACK_HOURS
+    max_alerts: int = DEFAULT_MAX_ALERTS
     # Replay mode. When set, every response is read from recorded JSON in this directory and no
     # request leaves the ActiveGate. It is one setting rather than a code path so that "we got
     # credentials" is a configuration change, not a rewrite - and so that the code above the
@@ -229,6 +252,10 @@ class ClusterConfig:
             max_host_link_objects=_int(
                 raw, "maxHostLinkObjects", label, minimum=1, maximum=10000
             ),
+            collect_alerts=_bool(raw, "collectAlerts"),
+            alert_descriptions=_bool(raw, "alertDescriptions"),
+            alert_lookback_hours=_int(raw, "alertLookbackHours", label, minimum=1, maximum=168),
+            max_alerts=_int(raw, "maxAlerts", label, minimum=1, maximum=1000),
             fixture_dir=_text(raw, "fixtureDir"),
         )
         config._validate_auth()
@@ -337,6 +364,8 @@ class ClusterConfig:
             names.append("protection")
         if self.collect_host_link:
             names.append("host_link")
+        if self.collect_alerts:
+            names.append("alerts")
         return tuple(names)
 
 

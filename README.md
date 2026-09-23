@@ -371,6 +371,73 @@ proves the edge mechanism end to end — the pipeline, the id computation, the e
 the sync loop are all the same either way; only the source of the mapping changes. Treat the
 bridge metric as the part to replace.
 
+## Cluster alerts as logs
+
+**Off by default.** Turn on *Collect cluster alerts as logs* on a monitoring configuration.
+
+The cluster's own health events — node down, disk failing, capacity threshold crossed — arrive
+in Grail as log records under `log.source == "cohesity_storage.alerts"`:
+
+```
+fetch logs
+| filter log.source == "cohesity_storage.alerts"
+| filter cohesity.alert.severity == "critical"
+| sort timestamp desc
+```
+
+Each record carries `cohesity.alert.id`, `.name`, `.severity`, `.category`, `.state`,
+`.description` and the cluster's own `.first_timestamp_usecs` / `.latest_timestamp_usecs`,
+alongside the usual `cohesity.cluster.id` and `.name`.
+
+### What is and is not in them
+
+These describe the **cluster**, not the data it protects. No usernames, no source addresses, no
+backup content — which is what separates them from Cohesity's audit log, where all three live.
+
+The one field that can name something in the protected estate is the free-form **description**:
+a datastore, a share, occasionally a VM. It has its own switch. Turning *Include alert
+descriptions* off keeps the alert — id, name, severity, category, state and timestamps — and
+drops only the sentence. That is a redaction, not a suppression: the alert still arrives.
+
+Whether that sentence may cross into Dynatrace is a decision for whoever owns the data, which
+is why alerts are opt-in rather than on by default. Nothing here reaches into a protected
+object.
+
+### Why logs and not metrics
+
+An alert is a discrete thing that happened and carries prose. A metric could count alerts —
+worth adding later — but it cannot say *which disk in which node*, and that sentence is the
+reason to collect these at all.
+
+### Three things that are easy to get wrong
+
+**De-duplication.** Alerts persist on the cluster and the poll window is deliberately wider
+than the interval, so the same open alert comes back every time. The ledger is what stops it
+being re-sent, and it keys on the alert id **plus its latest-occurrence timestamp** — not the
+id alone. An alert that fires, resolves and fires again keeps its id, and de-duplicating on the
+id would silently swallow the second fire, which is the one somebody is being paged about.
+
+**Timestamps.** Ingest rejects anything more than an hour old. An alert that has been open for
+a week is both perfectly valid and far outside that window, so the cluster's own clock is
+carried as an *attribute* and the record is timestamped when it was observed. Using the alert's
+own time would make exactly the oldest and most serious alerts vanish without a word.
+
+**Which path the cluster serves.** Two are tried — the v2 spelling the 7.4 reference documents,
+then the v1 path every release in the 6.8–7.4 range has served. A 404 from the first is an
+ordinary answer, not a fault. The winner is remembered but never permanently trusted: if it
+later fails, the chain is re-walked, because a cached failure on an intermittently unhealthy
+cluster would turn a temporary 500 into a silence only a restart could clear. Which one won is
+reported on the diagnostics channel as `alert_source`.
+
+### Not collected
+
+**Audit logs** (who did what, from where) carry usernames and source IPs — personal data under
+GDPR and similar regimes. Valuable for a security use case, but that is a decision with a
+data-protection dimension and a retention question attached, so it is deliberately not here.
+
+**Per-object run failure detail** as bizevents would keep the per-object failure the run delta
+counter collapses. Worth having; not yet built.
+
 ## Cohesity permissions
 
 What to ask a cluster owner for. Everything the extension does is **read-only** — it never
@@ -401,6 +468,11 @@ otherwise the extension's access silently tracks that person's, and dies when th
 
 **Ask for the built-in `COHESITY_VIEWER` role first.** It is Cohesity's read-only role and is
 very likely sufficient.
+
+Alerts are the one collection whose privilege has not been confirmed on a real cluster. If
+`COHESITY_VIEWER` does not cover alert read, the section fails on its own with a 403 and
+says so on the diagnostics channel, naming the path it tried — every other collection keeps
+working. Nothing needs to be guessed in advance; turn it on and read the diagnostic.
 
 > Caveat worth stating honestly: Viewer's exact privilege set could not be verified from public
 > documentation — Cohesity's role reference sits behind a login wall. Sufficient is probable,

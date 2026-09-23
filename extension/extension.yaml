@@ -1,5 +1,5 @@
 name: custom:cohesity.storage
-version: 0.2.0
+version: 0.2.1
 # Floor settled by ticket 03 against the release-tagged schema repo, not guessed. The binding
 # constraint is documents.screens (1.341); openpipeline smartscape lands earlier, at 1.330.
 minDynatraceVersion: "1.341.0"
@@ -78,6 +78,10 @@ python:
     - featureSet: host_link
       metrics:
         - key: cohesity.protectiongroup.protects
+
+# Alerts have no feature set on purpose. Feature sets gate metrics, and the alert collection
+# emits log records rather than metric lines - there would be nothing to list. Its switch is
+# the collectAlerts toggle in activationSchema.json, which is the only gate it has.
 
 # Metric-key PREFIX is what binds a metric to its Smartscape entity: the node-extraction rules
 # in openpipeline/metrics.pipeline.json match on `cohesity.cluster.*`,
