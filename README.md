@@ -17,30 +17,53 @@ ActiveGate ──https + apiKey──▶ Cohesity cluster ──REST──▶ me
 | Floors | `minDynatraceVersion 1.341.0`, `minEECVersion 1.333.0` (ActiveGate 1.333+) |
 | Needs on the cluster | A cluster API key. No agent — Cohesity is an appliance. |
 
-## Status: v0.1.0 — full metric set and Smartscape topology
+## Status: v0.2.1 — running against a real cluster
 
-22 metric keys across three entity prefixes, and three Smartscape node types with three edges,
-all derived from the metric stream by OpenPipeline. A fourth edge - protection group to the
-Dynatrace `HOST` it backs up - is opt-in and needs two assets installed on the tenant; see
-[Linking protection groups to hosts](#linking-protection-groups-to-hosts).
-
-Nothing has yet run against a real Cohesity cluster; every number below has only ever come
-from a synthetic fixture.
+22 metric keys across three entity prefixes, three Smartscape node types with three edges, a
+packaged dashboard, and cluster alerts as log records. Deployed and polling a production
+Cohesity cluster on an evaluation tenant.
 
 | Piece | Lives in |
 |---|---|
 | Metric keys, units and dimensions | `cohesity_storage/metrics.py`, `extension/extension.yaml` |
 | Parsed data to `report_metric` | `ExtensionImpl._poll` and the `_report_*` methods |
 | Entity types and relationships | `extension/openpipeline/metrics.pipeline.json` |
+| Dashboard | `extension/documents/cohesity-storage.dashboard.json` |
 
-Still open: dashboards, alerting, and the fact that the run-dedup ledger is in memory, so an
-ActiveGate restart re-counts recently completed protection runs.
+### What the real cluster taught us
+
+**Five metrics have never produced a point** — `cpu.usage`, `memory.usage`, `io.iops`,
+`io.latency`, `garbage.bytes`. They are not five failures: they are exactly the five fed by
+`/stats/time-series-stats`, which answers HTTP 500 for all 20 `entityId` candidates on that
+cluster. One broken endpoint. Their dashboard tiles are labelled rather than deleted, because
+this class of outage recovers on its own — `view.throughput` was dead for days and now answers
+roughly a fifth of intervals.
+
+**The cluster's stats subsystem fails intermittently, not permanently.** The same endpoint
+answers one poll and 500s the next, and which parameter shape works varies between polls. Any
+"this endpoint is broken" conclusion here has a shelf life.
+
+**Host linkage is parked.** See below.
+
+**The diagnostics channel is the reason any of this is known.** The extension's own log lines
+do not reach Grail on that tenant; `report_log_events` does. Every fact above came off
+`log.source == "cohesity_storage.diagnostics"`, usually in one deploy where inference had
+already failed several times.
+
+### Still open
+
+- Alerting rules and Davis anomaly detectors.
+- The run-dedup ledger is in memory, so an ActiveGate restart re-counts recently completed runs.
+- `run.outcome` arrives with no `status` dimension for a real fraction of runs (66 of 689 in a
+  24h sample). The dashboard labels these "Unknown"; the parsing gap behind it is untraced.
+- `run.objects` never carries `result: "total"` although `extension.yaml` documents it.
 
 **Every fixture in `fixtures/` is synthetic.** They were hand-written from Cohesity's published
-6.8–7.4 response schemas; no cluster has been reached. They prove the code parses the documented
-shapes, not that the shapes are right. Each one says so in its own `_fixture.provenance`, the
-extension logs a warning every poll while replaying one, and a test fails the moment one arrives
-unmarked.
+6.8–7.4 response schemas. They prove the code parses the documented shapes, not that the shapes
+are right — and on more than one occasion the real cluster has disagreed with them. Each one
+says so in its own `_fixture.provenance`, the extension logs a warning every poll while
+replaying one, and a test fails the moment one arrives unmarked.
+
 
 ## Why remote activation only
 
@@ -255,6 +278,27 @@ Four things here are load-bearing and each cost somebody a round trip to a tenan
   the domain's node id for the edge without creating a node.
 
 ## Linking protection groups to hosts
+
+> **PARKED as of v0.2.1.** The mechanism is correct and currently links nothing. Two
+> independent reasons, found on the customer cluster:
+>
+> 1. **The BIOS UUID is not in the protected-object listing.** That cluster returns only
+>    `uuid` — vCenter's instanceUuid — under every candidate field name the extension knows.
+>    The documented `vCenterSummary.biosUuid` is simply absent. The extension now emits no
+>    bridge metric at all rather than publishing an instanceUuid that can never match, and says
+>    so on the diagnostics channel, naming the fields the objects *do* carry.
+> 2. **The ceiling is three.** That tenant has three `HOST` entities in total. Cohesity protects
+>    146+ VMs there. Even a perfect join would draw three edges, because linkage can only reach
+>    VMs running OneAgent. There are no `VMWARE_VM` entities either, so joining via vCenter
+>    instead is not available.
+>
+> Reason 2 is why reason 1 was not chased further: finding the right field name costs a deploy
+> and the payoff is capped at three edges. Nothing here is wrong — it degrades quietly, as
+> designed — and it will start working if OneAgent coverage grows. Resume by finding where that
+> cluster exposes the BIOS UUID (the protection-sources or object-detail endpoints are the
+> candidates), adding the field name to `domain.BIOS_UUID_FIELDS`, and re-reading the
+> `host link:` diagnostic.
+
 
 **Off by default.** Turn on *Link protection groups to Dynatrace hosts (VMware only)* per
 cluster, then install the two tenant assets in [`dynatrace/`](dynatrace/README.md). Until both
