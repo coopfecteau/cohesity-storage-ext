@@ -473,6 +473,26 @@ later fails, the chain is re-walked, because a cached failure on an intermittent
 cluster would turn a temporary 500 into a silence only a restart could clear. Which one won is
 reported on the diagnostics channel as `alert_source`.
 
+### What the customer cluster actually sends
+
+Measured on the first poll with alerts on, across 100 alert records:
+
+| | |
+|---|---|
+| severities | 43 warning, 35 info, 22 critical - all mapped, none unknown |
+| categories | `kBackupRestore` 57, `kIndexing` 14, `kDataPath` 10, `kSystemService` 9, `kSecurity` 7, `kNodeHealth` 3 |
+| descriptions | 100 of 100 carry one; median 74 characters |
+
+**On the sensitivity question the description switch exists for:** in that sample there were no
+usernames, no IP addresses, no filesystem paths and no quoted job or object names. The only
+estate-identifying strings were three Active Directory domain-controller hostnames, inside
+`AdPreferredDomainControllerNotReachable` alerts - where naming the unreachable controller is
+the entire value of the alert. About a third of descriptions carry a long numeric Cohesity
+entity id.
+
+That is one cluster on one day and not a guarantee. It is a reason to look at the shape on a
+new cluster before assuming, which is what the `alert_shape` diagnostic reports.
+
 ### Not collected
 
 **Audit logs** (who did what, from where) carry usernames and source IPs — personal data under

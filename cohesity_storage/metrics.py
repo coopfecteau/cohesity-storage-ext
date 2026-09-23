@@ -937,6 +937,34 @@ def _diagnostic_event(fact: Mapping[str, Any]) -> dict | None:
             ),
             **common,
         }
+    if kind == "alert_source":
+        # Which of the two alert paths this cluster serves. Not answerable from the records:
+        # they carry identical fields whichever endpoint produced them.
+        return {
+            "severity": SEVERITY_INFO,
+            "content": (
+                f"cluster alerts are being read from {fact.get('source') or 'unknown'} "
+                f"({fact.get('path') or 'no path recorded'})"
+            ),
+            "cohesity.diagnostic": kind,
+            "cohesity.alert_source": str(fact.get("source") or ""),
+        }
+    if kind == "alert_source_failed":
+        # WARN, not ERROR: the chain has another candidate to try, and the path that failed is
+        # frequently one this cluster was never going to serve. The section failing outright
+        # arrives separately as a section_failure.
+        return {
+            "severity": SEVERITY_WARN,
+            "content": (
+                f"the alert path {fact.get('source') or 'unknown'} did not answer "
+                f"({fact.get('error') or 'unknown error'}), so the next candidate was tried. "
+                f"{fact.get('detail') or ''}"
+            ).strip(),
+            "cohesity.diagnostic": kind,
+            "cohesity.alert_source": str(fact.get("source") or ""),
+        }
+    if kind == "alert_shape":
+        return _alert_shape_event(fact)
     if kind == "run_status_unknown":
         return _run_status_unknown_event(fact)
     if kind == "host_link":
@@ -953,6 +981,46 @@ def _diagnostic_event(fact: Mapping[str, Any]) -> dict | None:
         }
     return None
 
+
+
+def _alert_shape_event(fact: Mapping[str, Any]) -> dict:
+    """What an alert response looks like - names and counts, never content.
+
+    The reason this record exists is the question nobody could answer before alerts were
+    collected: does this cluster's alert prose carry names out of the protected estate? The
+    honest way to answer it is to say how many descriptions exist and let a human look at a
+    few, not to paste one into a log record that then has to be treated as sensitive itself.
+
+    Unmapped severities are named because they are the one thing that silently degrades: an
+    unrecognised severity still produces a record, at WARN, and without this nobody would know
+    the map needed a new entry.
+    """
+    kind = "alert_shape"
+    keys = [str(item) for item in fact.get("keys") or []][:MAX_DIAGNOSTIC_FIELDS]
+    severities = [str(item) for item in fact.get("severities") or []]
+    unmapped = [str(item) for item in fact.get("unmapped") or []][:MAX_DIAGNOSTIC_FIELDS]
+    count = int(fact.get("count") or 0)
+    described = int(fact.get("with_description") or 0)
+    return {
+        # WARN only when a severity did not map, because that is the only part of this record
+        # that asks somebody to change something.
+        "severity": SEVERITY_WARN if unmapped else SEVERITY_INFO,
+        "content": (
+            f"alert response shape: {count} alert(s), {described} carrying a description. "
+            f"Severities seen: {', '.join(severities) or 'none'}"
+            + (
+                f". UNMAPPED severities, add them to domain._ALERT_SEVERITIES: "
+                f"{', '.join(unmapped)}"
+                if unmapped
+                else ""
+            )
+            + f". Key name(s) on the first alert ({len(keys)}): {', '.join(keys) or 'none'}"
+        ),
+        "cohesity.diagnostic": kind,
+        "cohesity.alert_keys": ", ".join(keys),
+        "cohesity.alert_severities": ", ".join(severities),
+        "cohesity.alert_unmapped_severities": ", ".join(unmapped),
+    }
 
 def _run_status_unknown_event(fact: Mapping[str, Any]) -> dict:
     """Extracted from :func:`_diagnostic_event`, which is at its complexity budget."""

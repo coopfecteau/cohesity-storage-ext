@@ -105,7 +105,10 @@ DEFAULT_HOST_LINK_OBJECTS = 200
 DEFAULT_COLLECT_ALERTS = False
 DEFAULT_ALERT_DESCRIPTIONS = True
 DEFAULT_ALERT_LOOKBACK_HOURS = 24
-DEFAULT_MAX_ALERTS = 100
+# 250, not 100: the first real poll against the customer cluster returned exactly 100 in a
+# 24h window, i.e. it hit the cap on the first try, and a cap that binds silently is how a
+# cluster in a bad state gets quieter in Dynatrace rather than louder.
+DEFAULT_MAX_ALERTS = 250
 
 DEFAULTS = {
     "port": 443,

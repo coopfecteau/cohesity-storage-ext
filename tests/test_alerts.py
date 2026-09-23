@@ -8,6 +8,7 @@ of the protected estate. Each class below is one of those.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -398,3 +399,48 @@ class TestAlertSourceChain:
 
         assert client.counted_alert_ids == 1
         assert client.counted_run_ids == 0
+
+
+class TestEveryFactKindIsHandled:
+    """A fact the client records and the metric layer drops is invisible, and silently so.
+
+    This is not hypothetical. The alert collection shipped in v0.2.1 recording three fact kinds
+    - alert_source, alert_source_failed, alert_shape - that ``_diagnostic_event`` had no branch
+    for. Unknown kinds are dropped by design, which is right, so the collection worked while
+    the diagnostics that were meant to explain WHICH alert path answered and WHAT the fields
+    were called never reached Grail at all. Nothing failed; the answer simply was not there.
+
+    So the rule is asserted structurally rather than remembered: every ``"kind": "..."`` literal
+    in client.py must produce a record.
+    """
+
+    def kinds_recorded_by_the_client(self) -> set[str]:
+        source = (
+            Path(__file__).resolve().parents[1] / "cohesity_storage" / "client.py"
+        ).read_text(encoding="utf-8")
+        return set(re.findall(r'"kind":\s*"([a-z_]+)"', source))
+
+    def test_the_scan_finds_the_kinds_at_all(self):
+        # If the literal spelling in client.py ever changes, this test must fail loudly rather
+        # than pass by matching nothing.
+        kinds = self.kinds_recorded_by_the_client()
+
+        assert len(kinds) >= 8, f"only found {kinds} - has the spelling changed?"
+        assert "alert_shape" in kinds
+
+    def test_every_recorded_kind_produces_a_record(self):
+        unhandled = []
+        for kind in sorted(self.kinds_recorded_by_the_client()):
+            events = metrics.diagnostic_log_events("1", "prod", "7.3.2", [{"kind": kind}])
+            if not events:
+                unhandled.append(kind)
+
+        assert not unhandled, (
+            f"client.py records these fact kinds and metrics._diagnostic_event drops them, "
+            f"so they never reach Grail: {unhandled}"
+        )
+
+    def test_an_unknown_kind_is_still_dropped_rather_than_guessed_at(self):
+        # The behaviour above is a coverage requirement, not a licence to invent a record for
+        # a fact nobody has written a sentence for.
+        assert metrics.diagnostic_log_events("1", "prod", "7.3.2", [{"kind": "nonsense"}]) == []
