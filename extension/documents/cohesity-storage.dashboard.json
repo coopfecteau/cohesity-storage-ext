@@ -1,5 +1,5 @@
 {
-  "version": 21,
+  "version": 22,
   "variables": [],
   "tiles": {
     "1": {
@@ -16,10 +16,17 @@
         "chartSettings": {
           "xAxisScaling": "analyzedTimeframe",
           "gapPolicy": "gap",
-          "legend": { "position": "bottom" }
+          "legend": {
+            "position": "bottom"
+          }
         },
-        "seriesConfig": { "gapPolicy": "gap" },
-        "layout": { "groupMode": "stacked", "position": "vertical" }
+        "seriesConfig": {
+          "gapPolicy": "gap"
+        },
+        "layout": {
+          "groupMode": "stacked",
+          "position": "vertical"
+        }
       },
       "querySettings": {}
     },
@@ -30,9 +37,19 @@
       "query": "timeseries runs = sum(cohesity.protectiongroup.run.outcome, scalar:true), by:{status}\n| filter runs > 0\n| fields Outcome = coalesce(status, \"Unknown\"), Runs = runs\n| sort Runs desc",
       "visualization": "donutChart",
       "visualizationSettings": {
-        "dataMapping": { "value": "Runs", "displayedFields": ["Outcome"] },
-        "labels": { "showLabels": true },
-        "valueSettings": { "valueRepresentation": "absolute", "showTotals": true }
+        "dataMapping": {
+          "value": "Runs",
+          "displayedFields": [
+            "Outcome"
+          ]
+        },
+        "labels": {
+          "showLabels": true
+        },
+        "valueSettings": {
+          "valueRepresentation": "absolute",
+          "showTotals": true
+        }
       },
       "querySettings": {}
     },
@@ -48,8 +65,12 @@
           "label": "SLA violations",
           "showLabel": true,
           "colorThresholdTarget": "value",
-          "sparklineSettings": { "isVisible": false },
-          "trend": { "isVisible": false }
+          "sparklineSettings": {
+            "isVisible": false
+          },
+          "trend": {
+            "isVisible": false
+          }
         },
         "thresholds": [
           {
@@ -58,8 +79,24 @@
             "field": "Groups in SLA violation",
             "isEnabled": true,
             "rules": [
-              { "id": 0, "color": { "Default": "var(--dt-colors-charts-status-ideal-default, #2f6862)" }, "comparator": "≥", "label": "OK", "value": 0 },
-              { "id": 1, "color": { "Default": "var(--dt-colors-charts-status-critical-default, #c62239)" }, "comparator": "≥", "label": "Violating", "value": 1 }
+              {
+                "id": 0,
+                "color": {
+                  "Default": "var(--dt-colors-charts-status-ideal-default, #2f6862)"
+                },
+                "comparator": "≥",
+                "label": "OK",
+                "value": 0
+              },
+              {
+                "id": 1,
+                "color": {
+                  "Default": "var(--dt-colors-charts-status-critical-default, #c62239)"
+                },
+                "comparator": "≥",
+                "label": "Violating",
+                "value": 1
+              }
             ]
           }
         ]
@@ -78,8 +115,12 @@
           "label": "Worst backup age",
           "showLabel": true,
           "colorThresholdTarget": "value",
-          "sparklineSettings": { "isVisible": false },
-          "trend": { "isVisible": false }
+          "sparklineSettings": {
+            "isVisible": false
+          },
+          "trend": {
+            "isVisible": false
+          }
         }
       },
       "querySettings": {}
@@ -108,10 +149,32 @@
       "query": "timeseries age = max(cohesity.protectiongroup.last_success.age, scalar:true), by:{cohesity.protectiongroup.name}\n| fieldsAdd bucket = if(age > 86400000, \"over 24h\", else: if(age > 43200000, \"12-24h\", else: if(age > 21600000, \"6-12h\", else: \"under 6h\")))\n| summarize `Protection groups` = count(), by:{`Time since last success` = bucket}\n| sort `Protection groups` desc",
       "visualization": "categoricalBarChart",
       "visualizationSettings": {
-        "dataMapping": { "displayedFields": ["Time since last success"], "values": ["Protection groups"] },
-        "categoryAxis": { "label": { "label": "Time since last success", "showLabel": true }, "tickLayout": "horizontal" },
-        "numericAxis": { "label": { "label": "Protection groups", "showLabel": true }, "scale": "linear" },
-        "layout": { "groupMode": "stacked", "position": "horizontal" }
+        "dataMapping": {
+          "displayedFields": [
+            "Time since last success"
+          ],
+          "values": [
+            "Protection groups"
+          ]
+        },
+        "categoryAxis": {
+          "label": {
+            "label": "Time since last success",
+            "showLabel": true
+          },
+          "tickLayout": "horizontal"
+        },
+        "numericAxis": {
+          "label": {
+            "label": "Protection groups",
+            "showLabel": true
+          },
+          "scale": "linear"
+        },
+        "layout": {
+          "groupMode": "stacked",
+          "position": "horizontal"
+        }
       },
       "querySettings": {}
     },
@@ -129,11 +192,23 @@
           "recordField": "Total capacity",
           "label": "Total (raw)",
           "showLabel": true,
-          "sparklineSettings": { "isVisible": false },
-          "trend": { "isVisible": false }
+          "sparklineSettings": {
+            "isVisible": false
+          },
+          "trend": {
+            "isVisible": false
+          }
         },
         "unitsOverrides": [
-          { "identifier": "Total capacity", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+          {
+            "identifier": "Total capacity",
+            "unitCategory": "data",
+            "baseUnit": "byte",
+            "displayUnit": null,
+            "decimals": 2,
+            "suffix": "",
+            "delimiter": false
+          }
         ]
       },
       "querySettings": {}
@@ -148,11 +223,23 @@
           "recordField": "Used capacity",
           "label": "Used (physical)",
           "showLabel": true,
-          "sparklineSettings": { "isVisible": false },
-          "trend": { "isVisible": false }
+          "sparklineSettings": {
+            "isVisible": false
+          },
+          "trend": {
+            "isVisible": false
+          }
         },
         "unitsOverrides": [
-          { "identifier": "Used capacity", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+          {
+            "identifier": "Used capacity",
+            "unitCategory": "data",
+            "baseUnit": "byte",
+            "displayUnit": null,
+            "decimals": 2,
+            "suffix": "",
+            "delimiter": false
+          }
         ]
       },
       "querySettings": {}
@@ -167,11 +254,23 @@
           "recordField": "Available capacity",
           "label": "Available",
           "showLabel": true,
-          "sparklineSettings": { "isVisible": false },
-          "trend": { "isVisible": false }
+          "sparklineSettings": {
+            "isVisible": false
+          },
+          "trend": {
+            "isVisible": false
+          }
         },
         "unitsOverrides": [
-          { "identifier": "Available capacity", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+          {
+            "identifier": "Available capacity",
+            "unitCategory": "data",
+            "baseUnit": "byte",
+            "displayUnit": null,
+            "decimals": 2,
+            "suffix": "",
+            "delimiter": false
+          }
         ]
       },
       "querySettings": {}
@@ -183,10 +282,29 @@
       "query": "timeseries { used = avg(cohesity.cluster.capacity.used), total = avg(cohesity.cluster.capacity.total) }\n| fieldsAdd `Used %` = arrayLast(used) * 100.0 / arrayLast(total)\n| fields `Used %`",
       "visualization": "gauge",
       "visualizationSettings": {
-        "valueBoundaries": { "min": { "mode": "custom", "value": 0 }, "max": { "mode": "custom", "value": 100 } },
-        "dataMapping": { "value": "Used %", "maxDataField": null, "minDataField": null },
-        "label": { "showLabel": true, "label": "Capacity used" },
-        "icon": { "showIcon": false, "icon": "MeterbarIcon" },
+        "valueBoundaries": {
+          "min": {
+            "mode": "custom",
+            "value": 0
+          },
+          "max": {
+            "mode": "custom",
+            "value": 100
+          }
+        },
+        "dataMapping": {
+          "value": "Used %",
+          "maxDataField": null,
+          "minDataField": null
+        },
+        "label": {
+          "showLabel": true,
+          "label": "Capacity used"
+        },
+        "icon": {
+          "showIcon": false,
+          "icon": "MeterbarIcon"
+        },
         "thresholds": [
           {
             "id": "usedpct",
@@ -194,14 +312,46 @@
             "field": "Used %",
             "isEnabled": true,
             "rules": [
-              { "id": 0, "color": { "Default": "var(--dt-colors-charts-status-ideal-default, #2f6862)" }, "comparator": "≥", "label": "OK", "value": 0 },
-              { "id": 1, "color": { "Default": "var(--dt-colors-charts-status-warning-default, #eea53c)" }, "comparator": "≥", "label": "Warning", "value": 80 },
-              { "id": 2, "color": { "Default": "var(--dt-colors-charts-status-critical-default, #c62239)" }, "comparator": "≥", "label": "Critical", "value": 90 }
+              {
+                "id": 0,
+                "color": {
+                  "Default": "var(--dt-colors-charts-status-ideal-default, #2f6862)"
+                },
+                "comparator": "≥",
+                "label": "OK",
+                "value": 0
+              },
+              {
+                "id": 1,
+                "color": {
+                  "Default": "var(--dt-colors-charts-status-warning-default, #eea53c)"
+                },
+                "comparator": "≥",
+                "label": "Warning",
+                "value": 80
+              },
+              {
+                "id": 2,
+                "color": {
+                  "Default": "var(--dt-colors-charts-status-critical-default, #c62239)"
+                },
+                "comparator": "≥",
+                "label": "Critical",
+                "value": 90
+              }
             ]
           }
         ],
         "unitsOverrides": [
-          { "identifier": "Used %", "unitCategory": "unspecified", "baseUnit": "percent", "displayUnit": null, "decimals": 1, "suffix": "", "delimiter": false }
+          {
+            "identifier": "Used %",
+            "unitCategory": "unspecified",
+            "baseUnit": "percent",
+            "displayUnit": null,
+            "decimals": 1,
+            "suffix": "",
+            "delimiter": false
+          }
         ]
       },
       "querySettings": {}
@@ -217,11 +367,23 @@
           "recordField": "Data reduction ratio",
           "label": "Logical : physical",
           "showLabel": true,
-          "sparklineSettings": { "isVisible": false },
-          "trend": { "isVisible": false }
+          "sparklineSettings": {
+            "isVisible": false
+          },
+          "trend": {
+            "isVisible": false
+          }
         },
         "unitsOverrides": [
-          { "identifier": "Data reduction ratio", "unitCategory": "unspecified", "baseUnit": "ratio", "displayUnit": null, "decimals": 1, "suffix": "x", "delimiter": false }
+          {
+            "identifier": "Data reduction ratio",
+            "unitCategory": "unspecified",
+            "baseUnit": "ratio",
+            "displayUnit": null,
+            "decimals": 1,
+            "suffix": "x",
+            "delimiter": false
+          }
         ]
       },
       "querySettings": {}
@@ -237,11 +399,23 @@
           "recordField": "Resiliency overhead",
           "label": "Resiliency overhead",
           "showLabel": true,
-          "sparklineSettings": { "isVisible": false },
-          "trend": { "isVisible": false }
+          "sparklineSettings": {
+            "isVisible": false
+          },
+          "trend": {
+            "isVisible": false
+          }
         },
         "unitsOverrides": [
-          { "identifier": "Resiliency overhead", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+          {
+            "identifier": "Resiliency overhead",
+            "unitCategory": "data",
+            "baseUnit": "byte",
+            "displayUnit": null,
+            "decimals": 2,
+            "suffix": "",
+            "delimiter": false
+          }
         ]
       },
       "querySettings": {}
@@ -255,9 +429,14 @@
         "chartSettings": {
           "xAxisScaling": "analyzedTimeframe",
           "gapPolicy": "gap",
-          "legend": { "position": "bottom" }
+          "legend": {
+            "position": "bottom"
+          }
         },
-        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" }
+        "seriesConfig": {
+          "curve": "linear",
+          "gapPolicy": "gap"
+        }
       },
       "querySettings": {}
     },
@@ -271,14 +450,39 @@
         "chartSettings": {
           "xAxisScaling": "analyzedTimeframe",
           "gapPolicy": "gap",
-          "legend": { "position": "bottom" }
+          "legend": {
+            "position": "bottom"
+          }
         },
         "axes": {
-          "yAxis": { "label": "Used %", "showLabel": true, "min": { "mode": "custom", "value": 0 }, "max": { "mode": "custom", "value": 100 }, "scale": "linear" }
+          "yAxis": {
+            "label": "Used %",
+            "showLabel": true,
+            "min": {
+              "mode": "custom",
+              "value": 0
+            },
+            "max": {
+              "mode": "custom",
+              "value": 100
+            },
+            "scale": "linear"
+          }
         },
-        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" },
+        "seriesConfig": {
+          "curve": "linear",
+          "gapPolicy": "gap"
+        },
         "unitsOverrides": [
-          { "identifier": "Used %", "unitCategory": "unspecified", "baseUnit": "percent", "displayUnit": null, "decimals": 1, "suffix": "", "delimiter": false }
+          {
+            "identifier": "Used %",
+            "unitCategory": "unspecified",
+            "baseUnit": "percent",
+            "displayUnit": null,
+            "decimals": 1,
+            "suffix": "",
+            "delimiter": false
+          }
         ]
       },
       "querySettings": {}
@@ -298,9 +502,33 @@
           "colorThresholdTarget": "value"
         },
         "unitsOverrides": [
-          { "identifier": "Logical", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false },
-          { "identifier": "Physical", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false },
-          { "identifier": "Resiliency overhead", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+          {
+            "identifier": "Logical",
+            "unitCategory": "data",
+            "baseUnit": "byte",
+            "displayUnit": null,
+            "decimals": 2,
+            "suffix": "",
+            "delimiter": false
+          },
+          {
+            "identifier": "Physical",
+            "unitCategory": "data",
+            "baseUnit": "byte",
+            "displayUnit": null,
+            "decimals": 2,
+            "suffix": "",
+            "delimiter": false
+          },
+          {
+            "identifier": "Resiliency overhead",
+            "unitCategory": "data",
+            "baseUnit": "byte",
+            "displayUnit": null,
+            "decimals": 2,
+            "suffix": "",
+            "delimiter": false
+          }
         ]
       },
       "querySettings": {}
@@ -315,9 +543,14 @@
         "chartSettings": {
           "xAxisScaling": "analyzedTimeframe",
           "gapPolicy": "gap",
-          "legend": { "position": "bottom" }
+          "legend": {
+            "position": "bottom"
+          }
         },
-        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" }
+        "seriesConfig": {
+          "curve": "linear",
+          "gapPolicy": "gap"
+        }
       },
       "querySettings": {}
     },
@@ -335,12 +568,27 @@
         "chartSettings": {
           "xAxisScaling": "analyzedTimeframe",
           "gapPolicy": "gap",
-          "legend": { "position": "bottom" }
+          "legend": {
+            "position": "bottom"
+          }
         },
-        "seriesConfig": { "gapPolicy": "gap" },
-        "layout": { "groupMode": "stacked", "position": "vertical" },
+        "seriesConfig": {
+          "gapPolicy": "gap"
+        },
+        "layout": {
+          "groupMode": "stacked",
+          "position": "vertical"
+        },
         "unitsOverrides": [
-          { "identifier": "Throughput", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+          {
+            "identifier": "Throughput",
+            "unitCategory": "data",
+            "baseUnit": "byte",
+            "displayUnit": null,
+            "decimals": 2,
+            "suffix": "",
+            "delimiter": false
+          }
         ]
       },
       "querySettings": {}
@@ -355,12 +603,29 @@
         "chartSettings": {
           "xAxisScaling": "analyzedTimeframe",
           "gapPolicy": "gap",
-          "legend": { "position": "bottom" }
+          "legend": {
+            "position": "bottom"
+          }
         },
         "axes": {
-          "yAxis": { "label": "Percent", "showLabel": true, "min": { "mode": "custom", "value": 0 }, "max": { "mode": "custom", "value": 100 }, "scale": "linear" }
+          "yAxis": {
+            "label": "Percent",
+            "showLabel": true,
+            "min": {
+              "mode": "custom",
+              "value": 0
+            },
+            "max": {
+              "mode": "custom",
+              "value": 100
+            },
+            "scale": "linear"
+          }
         },
-        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" }
+        "seriesConfig": {
+          "curve": "linear",
+          "gapPolicy": "gap"
+        }
       },
       "querySettings": {}
     },
@@ -374,9 +639,14 @@
         "chartSettings": {
           "xAxisScaling": "analyzedTimeframe",
           "gapPolicy": "gap",
-          "legend": { "position": "bottom" }
+          "legend": {
+            "position": "bottom"
+          }
         },
-        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" }
+        "seriesConfig": {
+          "curve": "linear",
+          "gapPolicy": "gap"
+        }
       },
       "querySettings": {}
     },
@@ -390,11 +660,24 @@
         "chartSettings": {
           "xAxisScaling": "analyzedTimeframe",
           "gapPolicy": "gap",
-          "legend": { "position": "bottom" }
+          "legend": {
+            "position": "bottom"
+          }
         },
-        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" },
+        "seriesConfig": {
+          "curve": "linear",
+          "gapPolicy": "gap"
+        },
         "unitsOverrides": [
-          { "identifier": "Latency", "unitCategory": "time", "baseUnit": "microsecond", "displayUnit": null, "decimals": null, "suffix": "", "delimiter": false }
+          {
+            "identifier": "Latency",
+            "unitCategory": "time",
+            "baseUnit": "microsecond",
+            "displayUnit": null,
+            "decimals": null,
+            "suffix": "",
+            "delimiter": false
+          }
         ]
       },
       "querySettings": {}
@@ -406,12 +689,43 @@
       "query": "timeseries throughput = avg(cohesity.cluster.view.throughput, scalar:true), by:{cohesity.view.name, operation}\n| filter isNotNull(throughput)\n| fields View = cohesity.view.name, Operation = operation, Throughput = throughput\n| sort Throughput desc\n| limit 20",
       "visualization": "categoricalBarChart",
       "visualizationSettings": {
-        "dataMapping": { "displayedFields": ["View", "Operation"], "values": ["Throughput"] },
-        "categoryAxis": { "label": { "label": "View", "showLabel": true }, "tickLayout": "horizontal" },
-        "numericAxis": { "label": { "label": "Throughput", "showLabel": true }, "scale": "linear" },
-        "layout": { "groupMode": "stacked", "position": "horizontal" },
+        "dataMapping": {
+          "displayedFields": [
+            "View",
+            "Operation"
+          ],
+          "values": [
+            "Throughput"
+          ]
+        },
+        "categoryAxis": {
+          "label": {
+            "label": "View",
+            "showLabel": true
+          },
+          "tickLayout": "horizontal"
+        },
+        "numericAxis": {
+          "label": {
+            "label": "Throughput",
+            "showLabel": true
+          },
+          "scale": "linear"
+        },
+        "layout": {
+          "groupMode": "stacked",
+          "position": "horizontal"
+        },
         "unitsOverrides": [
-          { "identifier": "Throughput", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+          {
+            "identifier": "Throughput",
+            "unitCategory": "data",
+            "baseUnit": "byte",
+            "displayUnit": null,
+            "decimals": 2,
+            "suffix": "",
+            "delimiter": false
+          }
         ]
       },
       "querySettings": {}
@@ -431,8 +745,12 @@
           "label": "Polls answered",
           "showLabel": true,
           "colorThresholdTarget": "value",
-          "sparklineSettings": { "isVisible": false },
-          "trend": { "isVisible": false }
+          "sparklineSettings": {
+            "isVisible": false
+          },
+          "trend": {
+            "isVisible": false
+          }
         },
         "thresholds": [
           {
@@ -441,14 +759,46 @@
             "field": "Polls answered",
             "isEnabled": true,
             "rules": [
-              { "id": 0, "color": { "Default": "var(--dt-colors-charts-status-critical-default, #c62239)" }, "comparator": "≥", "label": "Failing", "value": 0 },
-              { "id": 1, "color": { "Default": "var(--dt-colors-charts-status-warning-default, #eea53c)" }, "comparator": "≥", "label": "Intermittent", "value": 90 },
-              { "id": 2, "color": { "Default": "var(--dt-colors-charts-status-ideal-default, #2f6862)" }, "comparator": "≥", "label": "Healthy", "value": 100 }
+              {
+                "id": 0,
+                "color": {
+                  "Default": "var(--dt-colors-charts-status-critical-default, #c62239)"
+                },
+                "comparator": "≥",
+                "label": "Failing",
+                "value": 0
+              },
+              {
+                "id": 1,
+                "color": {
+                  "Default": "var(--dt-colors-charts-status-warning-default, #eea53c)"
+                },
+                "comparator": "≥",
+                "label": "Intermittent",
+                "value": 90
+              },
+              {
+                "id": 2,
+                "color": {
+                  "Default": "var(--dt-colors-charts-status-ideal-default, #2f6862)"
+                },
+                "comparator": "≥",
+                "label": "Healthy",
+                "value": 100
+              }
             ]
           }
         ],
         "unitsOverrides": [
-          { "identifier": "Polls answered", "unitCategory": "unspecified", "baseUnit": "percent", "displayUnit": null, "decimals": 1, "suffix": "", "delimiter": false }
+          {
+            "identifier": "Polls answered",
+            "unitCategory": "unspecified",
+            "baseUnit": "percent",
+            "displayUnit": null,
+            "decimals": 1,
+            "suffix": "",
+            "delimiter": false
+          }
         ]
       },
       "querySettings": {}
@@ -463,12 +813,29 @@
         "chartSettings": {
           "xAxisScaling": "analyzedTimeframe",
           "gapPolicy": "gap",
-          "legend": { "position": "bottom" }
+          "legend": {
+            "position": "bottom"
+          }
         },
         "axes": {
-          "yAxis": { "label": "1 = answered", "showLabel": true, "min": { "mode": "custom", "value": 0 }, "max": { "mode": "custom", "value": 1 }, "scale": "linear" }
+          "yAxis": {
+            "label": "1 = answered",
+            "showLabel": true,
+            "min": {
+              "mode": "custom",
+              "value": 0
+            },
+            "max": {
+              "mode": "custom",
+              "value": 1
+            },
+            "scale": "linear"
+          }
         },
-        "seriesConfig": { "curve": "linear", "gapPolicy": "gap" }
+        "seriesConfig": {
+          "curve": "linear",
+          "gapPolicy": "gap"
+        }
       },
       "querySettings": {}
     },
@@ -487,48 +854,380 @@
           "recordField": "Garbage awaiting collection",
           "label": "Garbage",
           "showLabel": true,
-          "sparklineSettings": { "isVisible": false },
-          "trend": { "isVisible": false }
+          "sparklineSettings": {
+            "isVisible": false
+          },
+          "trend": {
+            "isVisible": false
+          }
         },
         "unitsOverrides": [
-          { "identifier": "Garbage awaiting collection", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+          {
+            "identifier": "Garbage awaiting collection",
+            "unitCategory": "data",
+            "baseUnit": "byte",
+            "displayUnit": null,
+            "decimals": 2,
+            "suffix": "",
+            "delimiter": false
+          }
         ]
       },
       "querySettings": {}
+    },
+    "60": {
+      "type": "markdown",
+      "content": "## 6 - Cluster alerts\n\nCohesity's own health events, ingested as log records under `cohesity_storage.alerts`. These describe the **cluster**, not the data it protects: no usernames, no source addresses and no backup content.\n\n**These tiles are blank unless alerts are switched on.** They are off by default - *Collect cluster alerts as logs* on the monitoring configuration. A blank tile here means the collection is off, not that the cluster is healthy.\n\nCounts are of **distinct alerts**, not records: an alert that fires, resolves and fires again is two occurrences of one alert, and counting records would make a flapping alert look like an outbreak. `kNote` is Cohesity's informational state, not a problem."
+    },
+    "61": {
+      "type": "data",
+      "title": "Open critical alerts",
+      "description": "Distinct alerts at critical severity still in the kOpen state. The number to look at first.",
+      "query": "fetch logs\n| filter log.source == \"cohesity_storage.alerts\"\n| filter cohesity.alert.severity == \"critical\"\n| filter cohesity.alert.state == \"kOpen\"\n| summarize `Open critical` = countDistinctExact(cohesity.alert.id)",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "recordField": "Open critical",
+          "label": "Open critical",
+          "showLabel": true,
+          "autoscale": true,
+          "sparklineSettings": {
+            "isVisible": false
+          }
+        }
+      }
+    },
+    "62": {
+      "type": "data",
+      "title": "Open warning alerts",
+      "description": "Distinct alerts at warning severity still in the kOpen state.",
+      "query": "fetch logs\n| filter log.source == \"cohesity_storage.alerts\"\n| filter cohesity.alert.severity == \"warning\"\n| filter cohesity.alert.state == \"kOpen\"\n| summarize `Open warning` = countDistinctExact(cohesity.alert.id)",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "recordField": "Open warning",
+          "label": "Open warning",
+          "showLabel": true,
+          "autoscale": true,
+          "sparklineSettings": {
+            "isVisible": false
+          }
+        }
+      }
+    },
+    "63": {
+      "type": "data",
+      "title": "Distinct alerts in this timeframe",
+      "description": "Every severity and state. Compare with the two tiles to its left: a large number here against few open ones means the cluster raised and resolved a lot without anything being left outstanding.",
+      "query": "fetch logs\n| filter log.source == \"cohesity_storage.alerts\"\n| summarize `Alerts` = countDistinctExact(cohesity.alert.id)",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "recordField": "Alerts",
+          "label": "All alerts",
+          "showLabel": true,
+          "autoscale": true,
+          "sparklineSettings": {
+            "isVisible": false
+          }
+        }
+      }
+    },
+    "64": {
+      "type": "data",
+      "title": "Unreadable severities",
+      "description": "Alerts whose severity this extension could not map. Normally zero. A non-zero value is not a cluster problem - it means Cohesity used a severity name the extension does not know, it is being reported at WARN to be safe, and domain._ALERT_SEVERITIES needs the new name. The diagnostics channel names it.",
+      "query": "fetch logs\n| filter log.source == \"cohesity_storage.alerts\"\n| filter cohesity.alert.severity == \"unknown\"\n| summarize `Unmapped` = countDistinctExact(cohesity.alert.id)",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "recordField": "Unmapped",
+          "label": "Unmapped severity",
+          "showLabel": true,
+          "autoscale": true,
+          "sparklineSettings": {
+            "isVisible": false
+          }
+        }
+      }
+    },
+    "65": {
+      "type": "data",
+      "title": "Alerts raised over time, by severity",
+      "description": "When the cluster started complaining. Records, not distinct alerts: here the repeats are the signal, because a spike is what a degrading cluster looks like.",
+      "query": "fetch logs\n| filter log.source == \"cohesity_storage.alerts\"\n| makeTimeseries `Alerts` = count(), by:{cohesity.alert.severity}",
+      "visualization": "barChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "categoryAxis": [
+            "timeframe"
+          ],
+          "valueAxis": [
+            "Alerts"
+          ],
+          "categoricalBarChartSettings": {
+            "layout": "horizontal"
+          },
+          "barChartSettings": {
+            "stacked": true
+          }
+        }
+      }
+    },
+    "66": {
+      "type": "data",
+      "title": "What is complaining",
+      "description": "Distinct alerts by category and severity. kBackupRestore dominating is normal on a busy protection estate; kNodeHealth or kDataPath appearing is not.",
+      "query": "fetch logs\n| filter log.source == \"cohesity_storage.alerts\"\n| summarize `Alerts` = countDistinctExact(cohesity.alert.id), by:{`Category` = cohesity.alert.category, `Severity` = cohesity.alert.severity}\n| sort `Alerts` desc",
+      "visualization": "table",
+      "visualizationSettings": {
+        "table": {
+          "enableSparklines": false,
+          "hiddenColumns": []
+        }
+      }
+    },
+    "67": {
+      "type": "data",
+      "title": "Most recent alerts",
+      "description": "The newest occurrence of each alert, with the sentence the cluster wrote. The description can be withheld per cluster - Include alert descriptions - in which case this column is empty and every other one still works.",
+      "query": "fetch logs\n| filter log.source == \"cohesity_storage.alerts\"\n| fields `Time` = timestamp, `Severity` = cohesity.alert.severity, `Alert` = cohesity.alert.name, `Category` = cohesity.alert.category, `State` = cohesity.alert.state, `Detail` = cohesity.alert.description\n| sort `Time` desc\n| limit 100",
+      "visualization": "table",
+      "visualizationSettings": {
+        "table": {
+          "enableSparklines": false,
+          "hiddenColumns": []
+        }
+      }
     }
   },
   "layouts": {
-    "1": { "x": 0, "y": 0, "w": 24, "h": 2 },
-    "2": { "x": 0, "y": 2, "w": 12, "h": 6 },
-    "3": { "x": 12, "y": 2, "w": 6, "h": 6 },
-    "4": { "x": 18, "y": 2, "w": 6, "h": 3 },
-    "5": { "x": 18, "y": 5, "w": 6, "h": 3 },
-    "6": { "x": 0, "y": 8, "w": 16, "h": 9 },
-    "7": { "x": 16, "y": 8, "w": 8, "h": 9 },
-    "10": { "x": 0, "y": 17, "w": 24, "h": 2 },
-    "11": { "x": 0, "y": 19, "w": 4, "h": 4 },
-    "12": { "x": 4, "y": 19, "w": 4, "h": 4 },
-    "13": { "x": 8, "y": 19, "w": 4, "h": 4 },
-    "14": { "x": 12, "y": 19, "w": 4, "h": 4 },
-    "15": { "x": 16, "y": 19, "w": 4, "h": 4 },
-    "21": { "x": 20, "y": 19, "w": 4, "h": 4 },
-    "17": { "x": 0, "y": 23, "w": 12, "h": 6 },
-    "18": { "x": 12, "y": 23, "w": 12, "h": 6 },
-    "19": { "x": 0, "y": 29, "w": 14, "h": 8 },
-    "20": { "x": 14, "y": 29, "w": 10, "h": 8 },
-    "30": { "x": 0, "y": 37, "w": 24, "h": 3 },
-    "34": { "x": 0, "y": 40, "w": 12, "h": 7 },
-    "35": { "x": 12, "y": 40, "w": 12, "h": 7 },
-    "40": { "x": 0, "y": 47, "w": 24, "h": 2 },
-    "41": { "x": 0, "y": 49, "w": 6, "h": 4 },
-    "42": { "x": 6, "y": 49, "w": 18, "h": 4 },
-    "50": { "x": 0, "y": 53, "w": 24, "h": 4 },
-    "31": { "x": 0, "y": 57, "w": 6, "h": 6 },
-    "32": { "x": 6, "y": 57, "w": 6, "h": 6 },
-    "33": { "x": 12, "y": 57, "w": 6, "h": 6 },
-    "16": { "x": 18, "y": 57, "w": 6, "h": 6 }
+    "1": {
+      "x": 0,
+      "y": 0,
+      "w": 24,
+      "h": 2
+    },
+    "2": {
+      "x": 0,
+      "y": 2,
+      "w": 12,
+      "h": 6
+    },
+    "3": {
+      "x": 12,
+      "y": 2,
+      "w": 6,
+      "h": 6
+    },
+    "4": {
+      "x": 18,
+      "y": 2,
+      "w": 6,
+      "h": 3
+    },
+    "5": {
+      "x": 18,
+      "y": 5,
+      "w": 6,
+      "h": 3
+    },
+    "6": {
+      "x": 0,
+      "y": 8,
+      "w": 16,
+      "h": 9
+    },
+    "7": {
+      "x": 16,
+      "y": 8,
+      "w": 8,
+      "h": 9
+    },
+    "10": {
+      "x": 0,
+      "y": 17,
+      "w": 24,
+      "h": 2
+    },
+    "11": {
+      "x": 0,
+      "y": 19,
+      "w": 4,
+      "h": 4
+    },
+    "12": {
+      "x": 4,
+      "y": 19,
+      "w": 4,
+      "h": 4
+    },
+    "13": {
+      "x": 8,
+      "y": 19,
+      "w": 4,
+      "h": 4
+    },
+    "14": {
+      "x": 12,
+      "y": 19,
+      "w": 4,
+      "h": 4
+    },
+    "15": {
+      "x": 16,
+      "y": 19,
+      "w": 4,
+      "h": 4
+    },
+    "21": {
+      "x": 20,
+      "y": 19,
+      "w": 4,
+      "h": 4
+    },
+    "17": {
+      "x": 0,
+      "y": 23,
+      "w": 12,
+      "h": 6
+    },
+    "18": {
+      "x": 12,
+      "y": 23,
+      "w": 12,
+      "h": 6
+    },
+    "19": {
+      "x": 0,
+      "y": 29,
+      "w": 14,
+      "h": 8
+    },
+    "20": {
+      "x": 14,
+      "y": 29,
+      "w": 10,
+      "h": 8
+    },
+    "30": {
+      "x": 0,
+      "y": 37,
+      "w": 24,
+      "h": 3
+    },
+    "34": {
+      "x": 0,
+      "y": 40,
+      "w": 12,
+      "h": 7
+    },
+    "35": {
+      "x": 12,
+      "y": 40,
+      "w": 12,
+      "h": 7
+    },
+    "40": {
+      "x": 0,
+      "y": 47,
+      "w": 24,
+      "h": 2
+    },
+    "41": {
+      "x": 0,
+      "y": 49,
+      "w": 6,
+      "h": 4
+    },
+    "42": {
+      "x": 6,
+      "y": 49,
+      "w": 18,
+      "h": 4
+    },
+    "50": {
+      "x": 0,
+      "y": 53,
+      "w": 24,
+      "h": 4
+    },
+    "31": {
+      "x": 0,
+      "y": 57,
+      "w": 6,
+      "h": 6
+    },
+    "32": {
+      "x": 6,
+      "y": 57,
+      "w": 6,
+      "h": 6
+    },
+    "33": {
+      "x": 12,
+      "y": 57,
+      "w": 6,
+      "h": 6
+    },
+    "16": {
+      "x": 18,
+      "y": 57,
+      "w": 6,
+      "h": 6
+    },
+    "60": {
+      "x": 0,
+      "y": 63,
+      "w": 24,
+      "h": 4
+    },
+    "61": {
+      "x": 0,
+      "y": 67,
+      "w": 6,
+      "h": 4
+    },
+    "62": {
+      "x": 6,
+      "y": 67,
+      "w": 6,
+      "h": 4
+    },
+    "63": {
+      "x": 12,
+      "y": 67,
+      "w": 6,
+      "h": 4
+    },
+    "64": {
+      "x": 18,
+      "y": 67,
+      "w": 6,
+      "h": 4
+    },
+    "65": {
+      "x": 0,
+      "y": 71,
+      "w": 12,
+      "h": 6
+    },
+    "66": {
+      "x": 12,
+      "y": 71,
+      "w": 12,
+      "h": 6
+    },
+    "67": {
+      "x": 0,
+      "y": 77,
+      "w": 24,
+      "h": 8
+    }
   },
   "settings": {
-    "gridLayout": { "columnsCount": 24 }
+    "gridLayout": {
+      "columnsCount": 24
+    }
   }
 }

@@ -17,9 +17,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from cohesity_storage import metrics
+from cohesity_storage import domain, metrics
 from tests.test_reporting import replay_client, replay_samples
 
+FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures"
 EXTENSION_DIR = Path(__file__).resolve().parent.parent / "extension"
 PIPELINE_PATH = EXTENSION_DIR / "openpipeline" / "metrics.pipeline.json"
 SOURCE_PATH = EXTENSION_DIR / "openpipeline" / "metrics.source.json"
@@ -50,6 +51,23 @@ def activation_schema() -> dict:
 def emitted_dimensions() -> set[str]:
     """Every dimension key a full replay poll actually sends - not what the constants claim."""
     return {name for sample in replay_samples(replay_client()) for name in sample.dimensions}
+
+
+
+@pytest.fixture(scope="module")
+def emitted_log_attributes() -> set[str]:
+    """Every attribute name a poll attaches to an alert log record.
+
+    Built by running the shipped alert fixture through the same builder the extension uses,
+    for the same reason ``emitted_dimensions`` replays rather than reading the constants: a
+    hand-maintained list would drift, and the failure it exists to catch - a dashboard tile
+    querying a field nothing sends - is invisible, because such a tile just renders empty.
+    """
+    payload = json.loads(
+        (FIXTURE_DIR / "v2_alerts.json").read_text(encoding="utf-8")
+    )["body"]
+    events = metrics.alert_log_events("1", "cluster", domain.parse_alerts(payload))
+    return {name for event in events for name in event}
 
 
 def node_processors(pipeline: dict) -> list[dict]:
@@ -547,9 +565,13 @@ class TestDashboard:
         assert seen, "no tile queries any metric at all"
 
     def test_every_cohesity_token_in_a_query_is_a_real_key_or_dimension(
-        self, dashboard, emitted_dimensions
+        self, dashboard, emitted_dimensions, emitted_log_attributes
     ):
-        known = set(metrics.ALL_METRIC_KEYS) | set(emitted_dimensions)
+        known = (
+            set(metrics.ALL_METRIC_KEYS)
+            | set(emitted_dimensions)
+            | set(emitted_log_attributes)
+        )
         for tile_id, query in dashboard_queries(dashboard).items():
             for token in re.findall(r"cohesity(?:\.[A-Za-z0-9_]+)+", query):
                 assert token in known, f"tile {tile_id} references unknown {token}"
