@@ -62,6 +62,40 @@ API_KEY_FORBIDDEN = re.compile(r"\s")
 # and an empty credential presents as a 401 that sends someone to rotate a perfectly good key.
 VAULT_SECRET_FIELDS = ("token", "password", "apiKey")
 
+# How many protection groups the per-group runs fan-out may ask in one poll.
+#
+# It lives here rather than in the client because it is the one dial an operator has over what
+# that fan-out costs, and it has to be turnable without a rebuild: the customer cluster answers
+# HTTP 500 on two endpoints and times out on a third, so "how many requests may one poll spend
+# on a cluster that is already struggling" is a site decision, not a constant.
+#
+# 20 rather than the 10 v0.1.6 shipped. The fan-out rotates (see the client), so the cap is not
+# a coverage limit any more - it is a per-poll request budget, and the number of polls it takes
+# to see every group is the group count divided by it. On 42 groups, 20 is full coverage every
+# two to three polls; 10 was three to five, which is 15-25 minutes of blindness per group.
+DEFAULT_RUNS_FANOUT_GROUPS = 20
+
+# The host link (ticket 16), and the two numbers that keep it from being a cardinality bomb.
+#
+# The bridge metric carries ONE SERIES PER PROTECTED OBJECT. That is precisely the cardinality
+# ticket 04 ruled out of v1, and it is not a theoretical worry: one SQL protection group on the
+# customer's own cluster holds 856 objects, and a production Cohesity protects tens of
+# thousands. The mapping it carries is also *configuration* rather than telemetry - which VM a
+# job backs up changes weekly, not every five minutes - so paying for it per poll per object is
+# the wrong shape of cost. See the README and ticket 16 for the successor design.
+#
+# So it is OFF unless somebody asks for it, and when it is on it is capped twice: by how many
+# groups may be asked per poll (which reuses the runs fan-out budget, so the one dial an
+# operator already has over "this cluster is struggling" governs both), and by how many objects
+# may be emitted per poll regardless of how few groups that took.
+DEFAULT_COLLECT_HOST_LINK = False
+
+# 200 objects is a few hundred series - the same order as the rest of this extension's ingest,
+# which is what makes it a safe default to turn on. Raising it is a deliberate decision about
+# cardinality, and the extension says so in a diagnostic every time the cap truncates rather
+# than quietly publishing half a mapping.
+DEFAULT_HOST_LINK_OBJECTS = 200
+
 DEFAULTS = {
     "port": 443,
     "useCredentialVault": False,
@@ -69,8 +103,11 @@ DEFAULTS = {
     "collectStorageDomains": True,
     "collectViews": True,
     "collectProtection": True,
+    "collectHostLink": DEFAULT_COLLECT_HOST_LINK,
     "intervalMinutes": 5,
     "requestTimeoutSeconds": 30,
+    "maxRunFanoutGroups": DEFAULT_RUNS_FANOUT_GROUPS,
+    "maxHostLinkObjects": DEFAULT_HOST_LINK_OBJECTS,
     "fixtureDir": "",
 }
 
@@ -104,8 +141,20 @@ class ClusterConfig:
     collect_storage_domains: bool = True
     collect_views: bool = True
     collect_protection: bool = True
+    # Opt-in, and the only collection that is. See DEFAULT_COLLECT_HOST_LINK: it is the
+    # one thing this extension emits whose series count scales with the size of the
+    # protected estate rather than with the number of Cohesity objects being monitored.
+    collect_host_link: bool = DEFAULT_COLLECT_HOST_LINK
     interval_minutes: int = 5
     request_timeout_seconds: int = 30
+    # The per-poll request budget for the per-group runs fan-out - see
+    # :data:`DEFAULT_RUNS_FANOUT_GROUPS`. Not a coverage limit: the fan-out rotates, so a
+    # smaller number means every group is still seen, just less often.
+    max_run_fanout_groups: int = DEFAULT_RUNS_FANOUT_GROUPS
+    # The hard ceiling on bridge-metric series per poll. Truncation is reported as a WARN
+    # diagnostic, never silent: half a lookup table is indistinguishable from half an
+    # estate going unprotected, and nothing else in the product would say which it was.
+    max_host_link_objects: int = DEFAULT_HOST_LINK_OBJECTS
     # Replay mode. When set, every response is read from recorded JSON in this directory and no
     # request leaves the ActiveGate. It is one setting rather than a code path so that "we got
     # credentials" is a configuration change, not a rewrite - and so that the code above the
@@ -173,8 +222,13 @@ class ClusterConfig:
             collect_storage_domains=_bool(raw, "collectStorageDomains"),
             collect_views=_bool(raw, "collectViews"),
             collect_protection=_bool(raw, "collectProtection"),
+            collect_host_link=_bool(raw, "collectHostLink"),
             interval_minutes=_int(raw, "intervalMinutes", label, minimum=1, maximum=1440),
             request_timeout_seconds=_int(raw, "requestTimeoutSeconds", label, minimum=1, maximum=300),
+            max_run_fanout_groups=_int(raw, "maxRunFanoutGroups", label, minimum=1, maximum=500),
+            max_host_link_objects=_int(
+                raw, "maxHostLinkObjects", label, minimum=1, maximum=10000
+            ),
             fixture_dir=_text(raw, "fixtureDir"),
         )
         config._validate_auth()
@@ -281,6 +335,8 @@ class ClusterConfig:
             names.append("views")
         if self.collect_protection:
             names.append("protection")
+        if self.collect_host_link:
+            names.append("host_link")
         return tuple(names)
 
 
@@ -346,6 +402,14 @@ def _bool(raw: dict, prop: str) -> bool:
 
 def _int(raw: dict, prop: str, label: str, *, minimum: int, maximum: int) -> int:
     value = raw.get(prop, DEFAULTS.get(prop))
+    if value is None:
+        # An explicit null, which is what a *nullable* schema property carries on a monitoring
+        # configuration written before that property existed. A new REQUIRED property would
+        # break in-place config upgrades outright, so new settings are nullable - and that
+        # means the default has to live here, in code, rather than only in the schema.
+        # `_bool` and `_text` already did this; `_int` raised "must be a whole number, got
+        # None" and took the whole cluster's configuration down with it.
+        value = DEFAULTS.get(prop)
     try:
         number = int(value)
     except (TypeError, ValueError):

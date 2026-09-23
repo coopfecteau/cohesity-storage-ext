@@ -72,6 +72,22 @@ PROTECTION_GROUP_RUN_BYTES_LOGICAL = f"{PREFIX_PROTECTION_GROUP}.run.bytes_logic
 PROTECTION_GROUP_RUN_OBJECTS = f"{PREFIX_PROTECTION_GROUP}.run.objects"
 PROTECTION_GROUP_LAST_SUCCESS_AGE = f"{PREFIX_PROTECTION_GROUP}.last_success.age"
 
+# The bridge metric (ticket 16). A constant 1 whose only job is to carry identity: the pair
+# (protection group, VM BIOS UUID) that the host-link workflow reads back out of Grail to build
+# an OpenPipeline lookup table. Nothing charts it and nothing alerts on it.
+#
+# It sits under the protection-group prefix deliberately. That binds it to the group entity
+# the rest of this extension already creates, so the line also keeps the group's node alive and
+# correctly named - it does not mint anything new. The uuid rides as a dimension rather than as
+# part of the key, because a metric key per VM would be a metric key explosion.
+#
+# **This is a bounded-scale mechanism, not a general one**, and the bound is the whole design:
+# one series per protected object is exactly the cardinality ticket 04 ruled out of v1. One SQL
+# group on the customer's own cluster holds 856 objects; a production Cohesity protects tens of
+# thousands. So it is off unless asked for, VMware-only, and hard-capped per poll - see
+# :data:`cohesity_storage.config.DEFAULT_HOST_LINK_OBJECTS` and the README.
+PROTECTION_GROUP_PROTECTS = f"{PREFIX_PROTECTION_GROUP}.protects"
+
 #: Every key the extension can emit. Kept as data so a test can assert that each one is also
 #: declared in extension.yaml - an undeclared key is dropped by the EEC without a word.
 ALL_METRIC_KEYS = (
@@ -96,6 +112,7 @@ ALL_METRIC_KEYS = (
     PROTECTION_GROUP_RUN_BYTES_LOGICAL,
     PROTECTION_GROUP_RUN_OBJECTS,
     PROTECTION_GROUP_LAST_SUCCESS_AGE,
+    PROTECTION_GROUP_PROTECTS,
 )
 
 # ---------------------------------------------------------------------------
@@ -122,6 +139,10 @@ DIM_PROTECTION_GROUP_ID = "cohesity.protectiongroup.id"
 DIM_PROTECTION_GROUP_NAME = "cohesity.protectiongroup.name"
 DIM_VIEW_ID = "cohesity.view.id"
 DIM_VIEW_NAME = "cohesity.view.name"
+# The join key, carried only by the bridge metric. Already normalised to canonical
+# lowercase 8-4-4-4-12 by domain.normalise_object_uuid - an unnormalised value here would
+# match no host and there would be nothing to say so.
+DIM_OBJECT_UUID = "cohesity.object.uuid"
 
 DIM_SERVICE = "service"
 DIM_OPERATION = "operation"
@@ -435,6 +456,45 @@ def protection_group_samples(
     return samples
 
 
+def protected_object_samples(
+    cluster_id: str | int,
+    cluster_name: str,
+    links: list[domain.ProtectedObjectLink],
+) -> list[Sample]:
+    """The bridge metric: a constant 1 per (protection group, VM BIOS UUID) pair.
+
+    The value is meaningless on purpose - nothing charts it. What matters is the dimension
+    set, because the host-link workflow reads exactly these three fields back out of Grail
+    (``cohesity.cluster.id``, ``cohesity.protectiongroup.id``, ``cohesity.object.uuid``) and
+    turns them into the OpenPipeline lookup table that draws the
+    ``EXT_COHESITY_PROTECTION_GROUP --protects--> HOST`` edge. The group name rides along so a
+    human reading the table in Grail can tell which job a row is about.
+
+    **A partial line is never emitted.** A link missing either id or the uuid is dropped
+    outright rather than sent with a gap: the workflow would pair it with the wrong group, and
+    a wrong edge is worse than a missing one - it says a VM is backed up by a job that does not
+    touch it.
+
+    The uuid is already canonical by construction (:func:`domain.normalise_object_uuid` is the
+    only way a :class:`~.domain.ProtectedObjectLink` can be built), so nothing is normalised
+    here. Re-normalising would be a second copy of the rule to drift out of step.
+    """
+    samples = []
+    for link in links:
+        if not (link.protection_group_id and link.uuid):
+            continue
+        dimensions = cluster_dimensions(cluster_id, cluster_name)
+        # NOT run through entity_id(): the id on a ProtectedObjectLink is already namespaced by
+        # the client, which is the only layer that knows which cluster it read. Namespacing it
+        # twice would produce `{cluster}_{cluster}_{group}` and match no entity at all.
+        dimensions[DIM_PROTECTION_GROUP_ID] = link.protection_group_id
+        if link.protection_group_name:
+            dimensions[DIM_PROTECTION_GROUP_NAME] = link.protection_group_name
+        dimensions[DIM_OBJECT_UUID] = link.uuid
+        samples.append(Sample(PROTECTION_GROUP_PROTECTS, 1, dimensions))
+    return samples
+
+
 def protection_run_samples(
     cluster_id: str | int,
     cluster_name: str,
@@ -467,7 +527,13 @@ def protection_run_samples(
             group_id,
             run.protection_group_name or (group.name if group else ""),
             storage_domain_id=(group.storage_domain_id or None) if group else None,
-            status=run.status,
+            # `or RUN_STATUS_UNKNOWN`, and it is not belt and braces. An empty status is
+            # dropped by wire_dimensions, which produced 28 counted runs on the customer
+            # tenant carrying NO status dimension at all - a run counted and then
+            # unclassifiable, invisible unless somebody grouped by status. The domain parser
+            # now resolves "unknown" itself; this is the chokepoint that makes it true for
+            # every path into this function, including a ProtectionRun built by hand.
+            status=run.status or domain.RUN_STATUS_UNKNOWN,
             is_sla_violated=run.is_sla_violated,
             is_paused=group.is_paused if group else None,
             is_active=group.is_active if group else None,
@@ -563,6 +629,466 @@ def wire_value(value: Any) -> float | int | None:
 
 
 # ---------------------------------------------------------------------------
+# Diagnostics
+#
+# Log records, not metrics, and the only ones the extension emits. They exist because the
+# extension's own logs are not reaching Grail on the tenant this was debugged against, which
+# left exactly the facts needed to explain two silent metric gaps unreadable. Log ingest is a
+# different path and it does arrive, so the handful of facts worth having are carried out that
+# way instead.
+#
+# Deliberately narrow. Names of things, never values of things: no API key, no response body, no
+# capacity figure, nothing that would matter if the log stream were read by someone who should
+# not see this cluster's data.
+# ---------------------------------------------------------------------------
+
+#: Marks every record this extension writes, so one Grail filter finds all of them.
+LOG_SOURCE_DIAGNOSTICS = "cohesity_storage.diagnostics"
+
+SEVERITY_INFO = "INFO"
+SEVERITY_WARN = "WARN"
+SEVERITY_ERROR = "ERROR"
+
+#: How many field names one record will carry. A storage domain's stats object holds a few
+#: dozen; a cluster that published hundreds would be a bug, not a reason to write a huge record.
+MAX_DIAGNOSTIC_FIELDS = 60
+
+
+def diagnostic_log_events(
+    cluster_id: str | int,
+    cluster_name: str,
+    software_version: str,
+    facts: list[Mapping[str, Any]],
+) -> list[dict]:
+    """Turn the facts a client learned into log records ready for ``report_log_events``.
+
+    Built here rather than in the client for the same reason samples are: the client deals in
+    what the cluster said, this module deals in what Dynatrace is told. Unknown fact kinds are
+    dropped rather than guessed at, so a future fact cannot produce a record nobody can read.
+    """
+    common = {
+        "log.source": LOG_SOURCE_DIAGNOSTICS,
+        DIM_CLUSTER_ID: str(cluster_id),
+        DIM_CLUSTER_NAME: cluster_name,
+        "cohesity.cluster.version": software_version or "unreported",
+    }
+    events = []
+    for fact in facts:
+        event = _diagnostic_event(fact)
+        if event is not None:
+            events.append({**common, **event})
+    return events
+
+
+def _diagnostic_event(fact: Mapping[str, Any]) -> dict | None:
+    kind = str(fact.get("kind") or "")
+    if kind == "cluster_version":
+        return {
+            "severity": SEVERITY_INFO,
+            "content": (
+                f"Cohesity extension started against software version "
+                f"{fact.get('version') or 'unreported'} "
+                f"({fact.get('nodeCount', 0)} node(s), read from {fact.get('source', 'unknown')})"
+            ),
+            "cohesity.diagnostic": kind,
+        }
+    if kind == "entity_id_probe":
+        schema = str(fact.get("schema") or "")
+        candidates = [str(item) for item in fact.get("candidates") or []]
+        # Per-candidate outcomes: "1234=empty, 5678=data". Absent on a fact written before the
+        # probe recorded them, which is why the candidate list is still carried separately.
+        attempts = [str(item) for item in fact.get("attempts") or []]
+        common = {
+            "cohesity.diagnostic": kind,
+            "cohesity.schema": schema,
+            "cohesity.entity_id_candidates": ", ".join(candidates),
+            "cohesity.entity_id_attempts": ", ".join(attempts),
+        }
+        if fact.get("resolved"):
+            return {
+                "severity": SEVERITY_INFO,
+                "content": (
+                    f"entityId probe: {schema} returns data for entityId "
+                    f"{fact.get('entityId')} (tried {len(candidates)} candidate(s): "
+                    f"{', '.join(candidates) or 'none'})"
+                ),
+                **common,
+                "cohesity.entity_id": str(fact.get("entityId") or ""),
+            }
+        if fact.get("error"):
+            # The probe did not merely come back empty - a call raised. This is the record that
+            # did not exist before 0.1.5, and the one that explains a schema producing nothing
+            # with no empty-response warning to go with it.
+            return {
+                "severity": SEVERITY_ERROR,
+                "content": (
+                    f"entityId probe: {schema} could not be probed - the request failed at "
+                    f"{_failure_phrase(fact)}. Tried {len(candidates)} candidate(s) "
+                    f"({', '.join(candidates) or 'none'}), outcomes: "
+                    f"{', '.join(attempts) or 'none recorded'}"
+                ),
+                **common,
+                **_failure_attributes(fact),
+                "cohesity.entity_id": "",
+            }
+        return {
+            "severity": SEVERITY_WARN,
+            "content": (
+                f"entityId probe: {schema} returned no data points for any candidate "
+                f"({', '.join(candidates) or 'none offered'}), so its metrics are not reported. "
+                f"The right entityId for this schema is still unknown"
+            ),
+            **common,
+            "cohesity.entity_id": "",
+        }
+    if kind == "section_failure":
+        section = str(fact.get("section") or "unnamed section")
+        return {
+            "severity": SEVERITY_ERROR,
+            "content": (
+                f"{section} collection failed at {_failure_phrase(fact)}, so its metrics were "
+                f"not reported this interval"
+            ),
+            "cohesity.diagnostic": kind,
+            "cohesity.section": section,
+            **_failure_attributes(fact),
+        }
+    if kind == "param_variant":
+        path = str(fact.get("path") or "")
+        attempts = [str(item) for item in fact.get("attempts") or []][:MAX_DIAGNOSTIC_FIELDS]
+        requests = int(fact.get("requests") or 0)
+        common = {
+            "cohesity.diagnostic": kind,
+            "cohesity.path": path,
+            "cohesity.variant_attempts": ", ".join(attempts),
+            "cohesity.variant_requests": str(requests),
+        }
+        if fact.get("resolved"):
+            variant = str(fact.get("variant") or "")
+            return {
+                "severity": SEVERITY_WARN,
+                "content": (
+                    f"{path} refused its documented parameters with HTTP 500, but answers the "
+                    f"shape '{variant}'. That shape is now used for this endpoint for the life "
+                    f"of the extension process; found in {requests} extra request(s), tried: "
+                    f"{', '.join(attempts) or 'none'}"
+                ),
+                **common,
+                "cohesity.variant": variant,
+            }
+        return {
+            "severity": SEVERITY_ERROR,
+            "content": (
+                f"{path} answered HTTP 500 to its documented parameters and to every "
+                f"alternative shape tried ({', '.join(attempts) or 'none'}), so its metrics "
+                f"are not reported. The failure was {_failure_phrase(fact)}"
+            ),
+            **common,
+            **_failure_attributes(fact),
+            "cohesity.variant": "",
+        }
+    if kind == "runs_source":
+        source = str(fact.get("source") or "")
+        attempts = [str(item) for item in fact.get("attempts") or []][:MAX_DIAGNOSTIC_FIELDS]
+        common = {
+            "cohesity.diagnostic": kind,
+            "cohesity.runs_source": source,
+            "cohesity.runs_attempts": ", ".join(attempts),
+        }
+        if not source:
+            tried = ", ".join(attempts) or "none attempted"
+            return {
+                "severity": SEVERITY_ERROR,
+                "content": (
+                    f"no protection-runs endpoint answered ({tried}), so no run outcome, "
+                    f"duration or byte count is reported. The first failure was "
+                    f"{_failure_phrase(fact)}"
+                ),
+                **common,
+                **_failure_attributes(fact),
+            }
+        # Which of the three paths served the runs is the whole question ticket 18 opened
+        # with, and it is not answerable from the metrics: they carry the same keys whichever
+        # endpoint produced them. INFO when runs/summary won, WARN otherwise - a fallback
+        # working is good news that still means the documented endpoint is broken.
+        first = attempts[0].split("=")[0] if attempts else source
+        return {
+            "severity": SEVERITY_INFO if first == source else SEVERITY_WARN,
+            "content": (
+                f"protection runs are being read from {source} "
+                f"({fact.get('runs', 0)} run(s) in the window; tried: "
+                f"{', '.join(attempts) or 'none'})"
+            ),
+            **common,
+        }
+    if kind == "runs_fanout":
+        queried = int(fact.get("groups_queried") or 0)
+        total = int(fact.get("groups_total") or 0)
+        errored = int(fact.get("groups_errored") or 0)
+        seen = int(fact.get("runs_seen") or 0)
+        fresh = int(fact.get("runs_new") or 0)
+        per_group = int(fact.get("runs_per_group") or 0)
+        # The one diagnostic that is written every poll rather than once, because a single
+        # sample of it answers nothing. Three numbers separate the three stories that all
+        # looked identical from the metrics in v0.1.6: groups queried says whether the fan-out
+        # was looking at all, runs seen says whether the cluster had anything to show, and runs
+        # new says whether what it showed had already been counted. "0 seen of 20 queried" is a
+        # quiet cluster; "14 seen, 0 new" is a healthy steady state; "0 queried" is a bug.
+        return {
+            "severity": SEVERITY_WARN if errored else SEVERITY_INFO,
+            "content": (
+                f"per-group run fan-out asked {queried} of {total} protection group(s) for "
+                f"their last {per_group} run(s) each ({queried} request(s), rotating so every "
+                f"group is reached within a few polls): {seen} run(s) returned, {fresh} new "
+                f"after dedup, {errored} group(s) did not answer"
+            ),
+            "cohesity.diagnostic": kind,
+            "cohesity.runs_groups_queried": str(queried),
+            "cohesity.runs_groups_total": str(total),
+            "cohesity.runs_groups_errored": str(errored),
+            "cohesity.runs_per_group": str(per_group),
+            "cohesity.runs_seen": str(seen),
+            "cohesity.runs_new": str(fresh),
+        }
+    if kind == "protected_objects":
+        # Ticket 16's one question, asked once and answered here. Everything in this record is
+        # a NAME except the uuids, which are values on purpose: a verdict nobody can check is
+        # not evidence, and these are the customer's own VM identifiers arriving in the
+        # customer's own tenant. No object name, no address, no hostname.
+        fields = [str(item) for item in fact.get("fields") or []][:MAX_DIAGNOSTIC_FIELDS]
+        vmware_key = str(fact.get("vmwareKey") or "")
+        vmware_fields = [
+            str(item) for item in fact.get("vmwareFields") or []
+        ][:MAX_DIAGNOSTIC_FIELDS]
+        samples = [item for item in fact.get("uuids") or [] if isinstance(item, Mapping)]
+        values = [str(item.get("value") or "") for item in samples]
+        verdicts = [str(item.get("verdict") or "") for item in samples]
+        environment = str(fact.get("environment") or "unreported")
+        objects = int(fact.get("objects") or 0)
+        common = {
+            "cohesity.diagnostic": kind,
+            "cohesity.object_environment": environment,
+            "cohesity.object_count": str(objects),
+            "cohesity.object_fields": ", ".join(fields),
+            "cohesity.object_vmware_key": vmware_key,
+            "cohesity.object_vmware_fields": ", ".join(vmware_fields),
+            "cohesity.object_uuids": ", ".join(value for value in values if value),
+            "cohesity.object_uuid_verdicts": ", ".join(verdicts),
+        }
+        if fact.get("error"):
+            # WARN, not ERROR. Nothing is missing from the metric set because of this - the
+            # probe is an experiment, and saying otherwise would train someone to ignore the
+            # ERRORs that do mean a metric is gone.
+            return {
+                "severity": SEVERITY_WARN,
+                "content": (
+                    f"protected-object probe: includeObjectDetails could not be read - the "
+                    f"request failed at {_failure_phrase(fact)}. Protection-run collection is "
+                    f"unaffected; the protection-group to HOST join stays unproven"
+                ),
+                **common,
+                **_failure_attributes(fact),
+            }
+        if not objects:
+            return {
+                "severity": SEVERITY_WARN,
+                "content": (
+                    f"protected-object probe: the {environment} protection group asked with "
+                    f"includeObjectDetails returned no objects[].object at all, so this "
+                    f"cluster publishes no per-object identifier here and the "
+                    f"protection-group to HOST join cannot be built from run data"
+                ),
+                **common,
+            }
+        vmware = (
+            f"a VMware-specific '{vmware_key}' sub-object is present, with key(s): "
+            f"{', '.join(vmware_fields) or 'none'}"
+            if vmware_key
+            else "NO VMware-specific sub-object is present"
+        )
+        pairs = ", ".join(
+            f"{value or 'absent'} -> {verdict}"
+            for value, verdict in zip(values, verdicts, strict=False)
+        )
+        return {
+            "severity": SEVERITY_INFO,
+            "content": (
+                f"protected-object probe on a {environment} protection group: {objects} "
+                f"object(s); objects[].object key(s) ({len(fields)}): "
+                f"{', '.join(fields) or 'none'}; {vmware}; uuid shape of up to "
+                f"{len(samples)} object(s): {pairs or 'none'}"
+            ),
+            **common,
+        }
+    if kind == "run_status_unknown":
+        return _run_status_unknown_event(fact)
+    if kind == "host_link":
+        return _host_link_event(fact)
+    if kind == "storage_domain_stats_fields":
+        fields = [str(item) for item in fact.get("fields") or []][:MAX_DIAGNOSTIC_FIELDS]
+        return {
+            "severity": SEVERITY_INFO,
+            "content": (
+                f"storage domain stats fields ({len(fields)}): {', '.join(fields) or 'none'}"
+            ),
+            "cohesity.diagnostic": kind,
+            "cohesity.stats_fields": ", ".join(fields),
+        }
+    return None
+
+
+def _run_status_unknown_event(fact: Mapping[str, Any]) -> dict:
+    """Extracted from :func:`_diagnostic_event`, which is at its complexity budget."""
+    kind = "run_status_unknown"
+    # The record that turns "status: none" in a chart into an actionable field name. The
+    # run was counted - it is not lost - but it cannot be classified until somebody reads
+    # this list and sees which block this cluster puts the status in.
+    fields = [str(item) for item in fact.get("fields") or []][:MAX_DIAGNOSTIC_FIELDS]
+    runs = int(fact.get("runs") or 0)
+    return {
+        "severity": SEVERITY_WARN,
+        "content": (
+            f"{runs} protection run(s) this poll carried no status in localBackupInfo, at "
+            f"the run root, or in any archival/replication/cloudSpin target result, so "
+            f'they are counted as status="unknown" rather than losing the dimension '
+            f"entirely. Key name(s) one such run DID carry ({len(fields)}): "
+            f"{', '.join(fields) or 'none'} - whichever of those holds the status belongs "
+            f"in domain.run_status"
+        ),
+        "cohesity.diagnostic": kind,
+        "cohesity.run_status_unknown_runs": str(runs),
+        "cohesity.run_fields": ", ".join(fields),
+    }
+
+
+def _host_link_event(fact: Mapping[str, Any]) -> dict:
+    """Extracted from :func:`_diagnostic_event`, which is at its complexity budget."""
+    kind = "host_link"
+    # Ticket 16's collection, reporting on itself. This is the record that has to be
+    # readable by someone who never read the ticket, because four different outcomes all
+    # look like "no edges appeared in Smartscape" from the Dynatrace side: no VMware groups
+    # exist, the requests failed, the objects carry no usable uuid, or the per-poll cap
+    # truncated. Only the third means the join is impossible; only the fourth means the
+    # data is partial. Saying which is the whole point.
+    groups_vmware = int(fact.get("groups_vmware") or 0)
+    queried = int(fact.get("groups_queried") or 0)
+    errored = int(fact.get("groups_errored") or 0)
+    objects = int(fact.get("objects_seen") or 0)
+    linked = int(fact.get("objects_linked") or 0)
+    capped = bool(fact.get("capped"))
+    cap = int(fact.get("cap") or 0)
+    verdicts = [str(item) for item in fact.get("verdicts") or []][:MAX_DIAGNOSTIC_FIELDS]
+    common = {
+        "cohesity.diagnostic": kind,
+        "cohesity.host_link_groups_vmware": str(groups_vmware),
+        "cohesity.host_link_groups_queried": str(queried),
+        "cohesity.host_link_groups_errored": str(errored),
+        "cohesity.host_link_objects_seen": str(objects),
+        "cohesity.host_link_objects_linked": str(linked),
+        "cohesity.host_link_capped": "true" if capped else "false",
+        "cohesity.host_link_cap": str(cap),
+        "cohesity.host_link_verdicts": ", ".join(verdicts),
+    }
+    if fact.get("error"):
+        return {
+            "severity": SEVERITY_WARN,
+            "content": (
+                f"host link: object details could not be read - the request failed at "
+                f"{_failure_phrase(fact)}. Every other protection metric is unaffected; "
+                f"no protection-group to HOST edge is published this interval"
+            ),
+            **common,
+            **_failure_attributes(fact),
+        }
+    if not groups_vmware:
+        return {
+            "severity": SEVERITY_INFO,
+            "content": (
+                "host link: this cluster has no VMware protection group, so there is "
+                "nothing to join to a Dynatrace HOST. Only VMware objects publish a BIOS "
+                "UUID - SQL and physical objects carry no uuid field at all - so no other "
+                "environment is even asked"
+            ),
+            **common,
+        }
+    if objects and not linked:
+        # The loud one, and the reason ERROR rather than WARN. Everything upstream worked:
+        # VMware groups exist, they were asked, they answered, and they returned objects -
+        # and not one of those objects carried something that could be a BIOS UUID. That
+        # retires the whole host-link design on this cluster, and no fallback join on names
+        # is attempted, because a name join produces confident wrong edges.
+        return {
+            "severity": SEVERITY_ERROR,
+            "content": (
+                f"host link: {objects} VMware object(s) from {queried} protection group(s) "
+                f"carried NO usable BIOS UUID (uuid shapes seen: "
+                f"{', '.join(verdicts) or 'none'}), so no bridge metric was emitted and the "
+                f"protection-group to HOST join is NOT POSSIBLE on this cluster from run "
+                f"data. No fallback join on object names is attempted - it would produce "
+                f"confident wrong edges. The next place to look is /v2/data-protect/sources"
+            ),
+            **common,
+        }
+    if capped:
+        # Partial data that cannot be silent. Half a lookup table looks exactly like half
+        # the estate being unmonitored, and nothing else in the product would say otherwise.
+        return {
+            "severity": SEVERITY_WARN,
+            "content": (
+                f"host link: emitted {linked} of {objects} VMware object(s) and stopped at "
+                f"the per-poll cap of {cap}. The mapping published this interval is "
+                f"PARTIAL - hosts beyond the cap get no edge. Raise 'maxHostLinkObjects' "
+                f"if the cardinality is acceptable, or accept that this cluster's protected "
+                f"estate is larger than a metric-carried mapping should cover"
+            ),
+            **common,
+        }
+    return {
+        "severity": SEVERITY_WARN if errored else SEVERITY_INFO,
+        "content": (
+            f"host link: asked {queried} of {groups_vmware} VMware protection group(s) for "
+            f"object details ({errored} did not answer) and published {linked} of "
+            f"{objects} object(s) as a (protection group, BIOS UUID) pair. Unusable uuid "
+            f"shapes: {', '.join(verdicts) or 'none'}"
+        ),
+        **common,
+    }
+
+
+def _failure_phrase(fact: Mapping[str, Any]) -> str:
+    """One sentence naming where a failure happened and what the cluster called it.
+
+    The path and the parameter NAMES, never a parameter value. Which call was refused is the
+    whole question; what was passed to it is how a key or an id ends up in a log stream.
+    """
+    status = fact.get("status")
+    params = [str(item) for item in fact.get("params") or []][:MAX_DIAGNOSTIC_FIELDS]
+    where = str(fact.get("path") or "") or "no single endpoint"
+    if params:
+        where = f"{where} (query: {', '.join(params)})"
+    kind = str(fact.get("error") or "Exception")
+    if status:
+        kind = f"{kind} HTTP {status}"
+    detail = str(fact.get("detail") or "")
+    phrase = f"{where} - {kind}"
+    return f"{phrase}: {detail}" if detail else phrase
+
+
+def _failure_attributes(fact: Mapping[str, Any]) -> dict:
+    """The same failure as fields, so Grail can group by status or by path without parsing."""
+    status = fact.get("status")
+    params = [str(item) for item in fact.get("params") or []][:MAX_DIAGNOSTIC_FIELDS]
+    return {
+        "cohesity.error": str(fact.get("error") or "Exception"),
+        "cohesity.http_status": str(status) if status else "",
+        "cohesity.path": str(fact.get("path") or ""),
+        "cohesity.query_params": ", ".join(params),
+        # Already redacted and truncated by errors.error_facts; never a response body.
+        "cohesity.detail": str(fact.get("detail") or ""),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -593,20 +1119,28 @@ def _number(value: Any) -> float | int | None:
 
 __all__ = [
     "ALL_METRIC_KEYS",
+    "PROTECTION_GROUP_PROTECTS",
     "CLUSTER_TIME_SERIES_MAP",
     "DIMENSION_VALUE_MAX_CHARS",
+    "LOG_SOURCE_DIAGNOSTICS",
+    "MAX_DIAGNOSTIC_FIELDS",
     "PREFIX_CLUSTER",
     "PREFIX_PROTECTION_GROUP",
     "PREFIX_STORAGE_DOMAIN",
+    "SEVERITY_ERROR",
+    "SEVERITY_INFO",
+    "SEVERITY_WARN",
     "VIEW_METRIC_OPERATIONS",
     "Sample",
     "cluster_dimensions",
     "cluster_storage_samples",
     "clean_dimension_value",
     "cluster_time_series_samples",
+    "diagnostic_log_events",
     "entity_id",
     "escape_dimension_value",
     "protection_group_dimensions",
+    "protected_object_samples",
     "protection_group_samples",
     "protection_run_samples",
     "storage_domain_dimensions",

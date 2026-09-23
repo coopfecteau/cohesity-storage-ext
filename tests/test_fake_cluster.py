@@ -11,12 +11,18 @@ from pathlib import Path
 
 import pytest
 
-from cohesity_storage.client import CohesityClient
+from cohesity_storage import metrics
+from cohesity_storage.client import CLUSTER_STATS_CALLS, CohesityClient
 from cohesity_storage.config import ClusterConfig
+from cohesity_storage.domain import (
+    STORAGE_DOMAIN_LOGICAL_FIELDS,
+    STORAGE_DOMAIN_PHYSICAL_FIELDS,
+)
 from cohesity_storage.errors import CohesityAuthError, CohesityEndpointError
 from cohesity_storage.fixtures import FixtureStore
 from tests.cohesity_fake_cluster import (
     HOSTILE_NAME_SUFFIX,
+    V1_CLUSTER_PATH,
     FakeCohesityCluster,
     resolve,
     self_signed_certificate,
@@ -119,6 +125,96 @@ class TestTimeShifting:
         assert served - recorded == 86_400 * 1_000_000
 
 
+class TestWrongEntityIdAndRenamedFields:
+    """The two customer-cluster shapes v0.1.3 could not see, modelled so they can be seen.
+
+    Both are silent failures. A wrong entityId is HTTP 200 with the series present and empty;
+    a field spelled differently is simply absent from an otherwise complete ``stats`` object.
+    Neither produces an error, which is why both survived a green test suite and a real e2e run.
+    """
+
+    def series(self, answer):
+        return answer.body["timeSeriesStats"]
+
+    def test_the_right_entity_id_gets_the_recorded_points(self):
+        answer = resolve(
+            store(),
+            "/v2/stats/time-series-stats",
+            {"schemaName": "kSentryClusterStats", "entityId": "42"},
+            GOOD_HEADERS,
+            stats_entity_id="42",
+        )
+
+        assert answer.status == 200
+        assert any(entry["dataPoints"] for entry in self.series(answer))
+
+    def test_a_wrong_entity_id_gets_200_and_empty_data_points_not_an_error(self):
+        answer = resolve(
+            store(),
+            "/v2/stats/time-series-stats",
+            {"schemaName": "kSentryClusterStats", "entityId": "not-the-one"},
+            GOOD_HEADERS,
+            stats_entity_id="42",
+        )
+
+        assert answer.status == 200
+        assert [entry["metricName"] for entry in self.series(answer)]
+        assert all(entry["dataPoints"] == [] for entry in self.series(answer))
+
+    def test_the_knob_is_off_by_default_so_every_other_test_is_unaffected(self):
+        answer = resolve(
+            store(),
+            "/v2/stats/time-series-stats",
+            {"schemaName": "kSentryClusterStats", "entityId": "anything"},
+            GOOD_HEADERS,
+        )
+
+        assert any(entry["dataPoints"] for entry in self.series(answer))
+
+    def test_v1_public_cluster_is_refused_by_default(self):
+        # Unpublished for 6.8-7.4, so "this cluster will not serve it" is the honest default.
+        answer = resolve(store(), V1_CLUSTER_PATH, {}, GOOD_HEADERS)
+
+        assert answer.status == 404
+
+    def test_v1_public_cluster_can_refuse_with_a_403(self):
+        answer = resolve(store(), V1_CLUSTER_PATH, {}, GOOD_HEADERS, v1_cluster_status=403)
+
+        assert answer.status == 403
+
+    def test_v1_public_cluster_serves_an_id_when_the_cluster_is_told_to(self):
+        answer = resolve(store(), V1_CLUSTER_PATH, {}, GOOD_HEADERS, v1_cluster_id="777")
+
+        assert (answer.status, answer.body["id"]) == (200, "777")
+
+    def test_v1_public_cluster_still_needs_the_api_key(self):
+        assert resolve(store(), V1_CLUSTER_PATH, {}, {}, v1_cluster_id="777").status == 401
+
+    def test_a_renamed_stats_field_is_gone_under_its_recorded_name(self):
+        answer = resolve(
+            store(),
+            "/v2/storage-domains",
+            {"includeStats": "true"},
+            GOOD_HEADERS,
+            storage_domain_stats_aliases={"totalLogicalUsageBytes": "logicalUsageBytes"},
+        )
+
+        stats = answer.body["storageDomains"][0]["stats"]
+        assert "totalLogicalUsageBytes" not in stats
+        assert stats["logicalUsageBytes"] > 0
+
+    def test_renaming_leaves_the_fields_it_was_not_asked_about_alone(self):
+        answer = resolve(
+            store(),
+            "/v2/storage-domains",
+            {"includeStats": "true"},
+            GOOD_HEADERS,
+            storage_domain_stats_aliases={"totalLogicalUsageBytes": "logicalUsageBytes"},
+        )
+
+        assert answer.body["storageDomains"][0]["stats"]["localTierResiliencyImpactBytes"] > 0
+
+
 class TestOverASocket:
     """One end-to-end pass: real TLS, real headers, real status codes, the real transport."""
 
@@ -157,6 +253,108 @@ class TestOverASocket:
         assert storage.total_capacity_bytes > 0
         assert len(runs) == 4
         assert "/v2/clusters/status" in cluster.requests[0]
+
+    def test_the_host_link_produces_bridge_metrics_over_a_real_socket(self, cluster):
+        """Ticket 16's whole chain, once, over TLS - the path replay mode cannot cover.
+
+        The per-group runs endpoint is keyed by a group id, so replay has no fixture for it and
+        `protected_object_links` skips replay outright. This is therefore the only place the
+        fan-out, the `includeObjectDetails` request, the uuid normalisation and the metric's
+        dimensions are exercised together against something that speaks HTTP.
+        """
+        client = CohesityClient(self.config(cluster, collect_host_link=True))
+
+        links = client.protected_object_links()
+        samples = metrics.protected_object_samples("1234567890123456", "prod", links)
+
+        # Two VMware objects on the one kVMware group that has a run carrying objects.
+        assert {link.uuid for link in links} == {
+            "00112233-4455-6677-8899-aabbccddeeff",
+            "421f9a3b-88c0-4f11-9d2e-6b7a10cc45ef",
+        }
+        assert {sample.key for sample in samples} == {metrics.PROTECTION_GROUP_PROTECTS}
+        for sample in samples:
+            wired = metrics.wire_dimensions(sample.dimensions)
+            # Every field the sync workflow joins on has to survive the wire format.
+            assert wired[metrics.DIM_CLUSTER_ID] == "1234567890123456"
+            assert wired[metrics.DIM_PROTECTION_GROUP_ID].startswith("1234567890123456_")
+            assert wired[metrics.DIM_OBJECT_UUID] in {link.uuid for link in links}
+        # The kSQL group is never asked - it has no uuid to give.
+        assert not [request for request in cluster.requests if "g-9002/runs" in request]
+
+    def test_the_host_link_asks_nothing_when_it_is_switched_off(self, cluster):
+        client = CohesityClient(self.config(cluster))
+
+        assert client.protected_object_links() == []
+        assert not [request for request in cluster.requests if "includeObjectDetails" in request]
+
+    def test_the_entity_id_probe_finds_the_id_only_the_v1_endpoint_knows(self, cluster):
+        # The customer shape exactly: /v2/clusters/status carries an id the stats API does not
+        # answer to, and v1 /public/cluster carries the one it does.
+        cluster.v1_cluster_id = "9988776655"
+        cluster.stats_entity_id = "9988776655"
+        client = CohesityClient(self.config(cluster))
+
+        series = client.cluster_time_series(CLUSTER_STATS_CALLS[0])
+
+        assert series["kCpuUsagePct"].latest_value() is not None
+        assert client.entity_id_candidates()[0] == "9988776655"
+        assert any(V1_CLUSTER_PATH in request for request in cluster.requests)
+
+    def test_a_403_from_the_v1_endpoint_costs_a_candidate_not_the_poll(self, cluster):
+        cluster.v1_cluster_status = 403
+        cluster.stats_entity_id = "1234567890123456"
+        client = CohesityClient(self.config(cluster))
+
+        series = client.cluster_time_series(CLUSTER_STATS_CALLS[0])
+
+        assert series["kCpuUsagePct"].latest_value() is not None
+        assert "9988776655" not in client.entity_id_candidates()
+
+    def test_no_candidate_answering_reports_nothing_rather_than_a_zero(self, cluster):
+        cluster.stats_entity_id = "an-id-nothing-here-will-offer"
+        client = CohesityClient(self.config(cluster))
+
+        series = client.cluster_time_series(CLUSTER_STATS_CALLS[0])
+
+        assert all(metric.latest_value() is None for metric in series.values())
+        assert metrics.cluster_time_series_samples("1", "p", "kSentryClusterStats", series) == []
+
+    def usage(self, cluster) -> dict:
+        return {
+            storage_domain.id: (
+                storage_domain.total_logical_usage_bytes,
+                storage_domain.local_total_physical_usage_bytes,
+            )
+            for storage_domain in CohesityClient(self.config(cluster)).storage_domains()
+        }
+
+    def test_usage_fields_spelled_differently_read_the_same_numbers(self, cluster):
+        baseline = self.usage(cluster)
+        cluster.storage_domain_stats_aliases = {
+            "totalLogicalUsageBytes": "logicalUsageBytes",
+            "localTotalPhysicalUsageBytes": "totalPhysicalUsageBytes",
+        }
+
+        assert self.usage(cluster) == baseline
+        assert all(numbers[0] and numbers[1] for numbers in baseline.values())
+
+    def test_no_candidate_name_present_produces_no_sample_not_a_zero(self, cluster):
+        # Renaming every candidate away is the only honest way to say "this cluster spells them
+        # in some way nobody has anticipated", which is the state the customer cluster was in.
+        cluster.storage_domain_stats_aliases = {
+            name: f"unheardOf{name}"
+            for name in STORAGE_DOMAIN_LOGICAL_FIELDS + STORAGE_DOMAIN_PHYSICAL_FIELDS
+        }
+        client = CohesityClient(self.config(cluster))
+
+        samples = metrics.storage_domain_samples("1", "prod", client.storage_domains())
+
+        keys = {sample.key for sample in samples}
+        assert metrics.STORAGE_DOMAIN_USAGE_LOGICAL not in keys
+        assert metrics.STORAGE_DOMAIN_USAGE_PHYSICAL not in keys
+        # The one that demonstrably arrives on a real cluster is untouched by the aliasing.
+        assert metrics.STORAGE_DOMAIN_RESILIENCY_BYTES in keys
 
     def test_a_missing_api_key_surfaces_as_the_auth_message(self, cluster):
         cluster.api_key = "the-real-key"

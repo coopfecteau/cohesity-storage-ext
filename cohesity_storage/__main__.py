@@ -23,7 +23,12 @@ import time
 from dynatrace_extension import Extension, MetricType, Status, StatusValue
 
 from . import metrics
-from .client import CLUSTER_STATS_CALLS, VIEW_METRICS, CohesityClient
+from .client import (
+    CLUSTER_STATS_CALLS,
+    MAX_VARIANT_REQUESTS_PER_POLL,
+    VIEW_METRICS,
+    CohesityClient,
+)
 from .config import ClusterConfig, load_clusters
 from .errors import CohesityError
 
@@ -107,15 +112,18 @@ class ExtensionImpl(Extension):
 
     def _poll(self, config: ClusterConfig) -> None:
         client = self._client_for(config)
+        # Opens this poll's budget for parameter-variant probing. Without it a cluster that
+        # answers HTTP 500 to everything would re-probe every endpoint on every poll forever.
+        client.begin_poll()
         try:
             status = client.cluster_status()
         except CohesityError as exception:
             self.logger.error(str(exception))
-            self._report_failure(config)
+            self._fail(client, config, "cluster status", exception)
             return
-        except Exception:
+        except Exception as exception:  # noqa: BLE001 - reported, then the poll ends here
             self.logger.exception(f"{config.name}: unexpected failure polling the cluster")
-            self._report_failure(config)
+            self._fail(client, config, "cluster status", exception)
             return
 
         cluster_id = status.cluster_id
@@ -144,18 +152,93 @@ class ExtensionImpl(Extension):
             if enabled:
                 self._section(config, label, collect, client, cluster_id, cluster_name)
 
+        self._report_diagnostics(client, cluster_id, cluster_name)
+
+        if client.variant_requests:
+            # Every poll it is non-zero, not once: the count is the thing that would say a
+            # probe had stopped being a one-off and become a per-poll tax on the cluster.
+            self.logger.warning(
+                f"{cluster_name}: spent {client.variant_requests} extra request(s) this poll "
+                f"probing parameter shapes for endpoints that answered HTTP 500 (budget "
+                f"{MAX_VARIANT_REQUESTS_PER_POLL} per poll)"
+            )
+
         for caveat in client.caveats():
             # Logged every poll, not once. A synthetic fixture is most dangerous to whoever
             # reads the logs six weeks from now without having been told.
             self.logger.warning(caveat)
 
-    def _section(self, config: ClusterConfig, label: str, collect, *args) -> None:
+    def _fail(
+        self, client: CohesityClient, config: ClusterConfig, label: str, exception: BaseException
+    ) -> None:
+        """The cluster did not answer at all: report the miss, then say why over log ingest.
+
+        The diagnostic is drained here rather than at the end of ``_poll`` because this path
+        returns early - and the poll where the cluster itself is unreachable is precisely the
+        one whose explanation is worth having. ``config.name`` stands in for both ids for the
+        same reason ``_report_failure`` uses it: the cluster id is unavailable in exactly this
+        case.
+        """
+        client.note_failure(label, exception)
+        self._report_failure(config)
+        self._report_diagnostics(client, config.name, config.name)
+
+    def _report_diagnostics(self, client: CohesityClient, cluster_id: str, cluster_name: str) -> None:
+        """Send the facts this client has learned, as log events, once per client lifetime.
+
+        Log ingest rather than ``self.logger``: on the tenant this was debugged against the
+        extension's own log lines are not reaching Grail, which left exactly the facts needed to
+        explain two silent metric gaps - which entityId a schema answers to, and what a storage
+        domain's stats object actually calls its fields - unreadable. Log events take a
+        different path and do arrive.
+
+        The client drains itself, so this is once per client and not once per poll however often
+        it is called. Wrapped because a diagnostic that costs a poll would be worse than no
+        diagnostic at all.
+        """
+        facts = client.take_diagnostics()
+        if not facts:
+            return
         try:
-            collect(*args)
+            # The cached version, never a fetch: this runs on the poll where /v2/clusters/status
+            # was the call that failed, and describing a failure must not be able to fail.
+            events = metrics.diagnostic_log_events(
+                cluster_id, cluster_name, client.software_version, facts
+            )
+            if events:
+                self.report_log_events(events)
+        except Exception:
+            self.logger.exception(f"{cluster_name}: could not report extension diagnostics")
+
+    def _section(
+        self, config: ClusterConfig, label: str, collect, client: CohesityClient, *args
+    ) -> None:
+        """Run one section, and make sure a failure leaves the ActiveGate.
+
+        The log line stays - it is still the right thing on an ActiveGate whose logs someone
+        can read. The fact is new, and it is what this whole change is for: on the tenant this
+        was debugged against these log lines do not reach Grail, so five missing metrics came
+        with no explanation anywhere a human could get at. The fact is drained by
+        ``_report_diagnostics`` after the sections, i.e. in this same poll.
+        """
+        try:
+            collect(client, *args)
         except CohesityError as exception:
             self.logger.error(f"{config.name}: {label} collection failed - {exception}")
-        except Exception:
+            self._note_failure(client, config, label, exception)
+        except Exception as exception:  # noqa: BLE001 - one section must not cost the poll
             self.logger.exception(f"{config.name}: unexpected failure collecting {label}")
+            self._note_failure(client, config, label, exception)
+
+    def _note_failure(
+        self, client: CohesityClient, config: ClusterConfig, label: str, exception: BaseException
+    ) -> None:
+        # Wrapped for the same reason the diagnostic report is: a diagnostic that costs a poll
+        # would be worse than no diagnostic at all.
+        try:
+            client.note_failure(label, exception)
+        except Exception:
+            self.logger.exception(f"{config.name}: could not record the {label} failure")
 
     def _report(self, samples: list[metrics.Sample]) -> None:
         for sample in samples:
@@ -220,13 +303,17 @@ class ExtensionImpl(Extension):
                 cluster_id, cluster_name, call["schemaName"], series
             )
             if series and not samples:
-                # All-empty with no error is the signature of a wrong entityId, which is ticket
-                # 04's biggest open risk. It is silent unless something says this.
+                # All-empty with no error is the signature of a wrong entityId, and on a real
+                # customer cluster that is exactly what happened to all five cluster metrics.
+                # The client now probes several candidates, so reaching here means every one of
+                # them came back empty - which is worth naming, because the list is the whole
+                # state of the investigation.
+                candidates = client.entity_ids_tried(call["schemaName"])
                 self.logger.warning(
-                    f"{cluster_name}: {call['schemaName']} returned no data points for entityId "
-                    f"{client.cluster_status().stats_entity_id}. The assumption that "
-                    f"ClusterStatus.clusterId is the stats entity id may be wrong - this failure "
-                    f"mode returns empty rather than an error"
+                    f"{cluster_name}: {call['schemaName']} returned no data points for any "
+                    f"candidate entityId ({', '.join(candidates) or 'none could be built'}), so "
+                    f"its metrics are not reported. This failure mode returns empty rather than "
+                    f"an error, so nothing else will say so"
                 )
             self._report(samples)
 
@@ -248,18 +335,39 @@ class ExtensionImpl(Extension):
         which the runs summary omits.
         """
         groups = client.protection_groups()
+
+        # Ticket 16's question, asked once per client lifetime and never per poll: do these
+        # protected objects carry a VMware BIOS UUID that could be joined to a Dynatrace HOST?
+        # It cannot raise and it cannot run twice, so the run collection below is unaffected
+        # whichever way it goes. The groups are handed down because they are already in hand.
+        client.probe_protected_objects(groups)
+
         now_usecs = int(time.time() * 1_000_000)
         self._report(metrics.protection_group_samples(cluster_id, cluster_name, groups, now_usecs))
 
         # Deduplicated on run.id by the client's ledger. Counting what protection_runs()
         # returns directly would inflate every failure by the window-to-interval ratio.
-        runs = client.new_protection_runs()
+        #
+        # The groups are handed down rather than re-fetched: if runs/summary times out and the
+        # per-group fallback is reached, that fallback needs the job inventory, and it is
+        # already in hand here. Paying for it twice on the poll where the cluster has just
+        # proved it is slow would be the wrong place to save a line.
+        runs = client.new_protection_runs(groups=groups)
         self._report(metrics.protection_run_samples(cluster_id, cluster_name, runs, groups))
+
+        # Ticket 16's bridge metric, and LAST on purpose. It is opt-in, bounded and never
+        # raises, but it is also the newest and most expensive thing in this section, so it
+        # runs after every metric that matters has already been reported. The client gates
+        # itself on the toggle - collection budget is its decision, not this module's.
+        links = client.protected_object_links(groups)
+        self._report(metrics.protected_object_samples(cluster_id, cluster_name, links))
+
         self.logger.info(
             f"{cluster_name}: {len(groups)} protection group(s); {len(runs)} newly finished "
             f"run(s) this interval "
             f"({', '.join(f'{run.protection_group_name}:{run.status}' for run in runs) or 'none'}); "
-            f"{client.counted_run_ids} run id(s) held against double counting"
+            f"{client.counted_run_ids} run id(s) held against double counting; "
+            f"runs read from {client.runs_source or 'no endpoint'}{_fanout_phrase(client)}"
         )
 
     def _report_failure(self, config: ClusterConfig) -> None:
@@ -312,6 +420,23 @@ class ExtensionImpl(Extension):
         # attribute '_clients'" during monitoring-configuration assignment.
         if not hasattr(self, "_clients"):
             self.initialize()
+
+
+def _fanout_phrase(client: CohesityClient) -> str:
+    """What the per-group fan-out cost and found this poll, or nothing if it did not run.
+
+    On the ActiveGate's own log this is the line that says whether a quiet interval means a
+    quiet cluster or a fan-out looking at the wrong twenty groups. The same numbers leave over
+    log ingest as a ``runs_fanout`` fact, because these log lines do not reach Grail on the
+    tenant this was debugged against - this is the copy for whoever can read the ActiveGate.
+    """
+    fanout = client.runs_fanout
+    if not fanout:
+        return ""
+    return (
+        f"; fan-out asked {fanout['groups_queried']}/{fanout['groups_total']} group(s) "
+        f"({fanout['groups_errored']} errored) and saw {fanout['runs_seen']} run(s)"
+    )
 
 
 def main():

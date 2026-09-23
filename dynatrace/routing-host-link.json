@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "One entry in builtin:openpipeline.metrics.routing, created by hand once.",
+    "",
+    "WHY BY HAND. The extension package installs the pipeline itself - it is declared in",
+    "extension.yaml and arrives with the zip. What it cannot install is this: a routing entry",
+    "on the BUILT-IN metrics ingest. An extension's own openpipeline source routes the",
+    "extension's own metrics, and host metrics are not the extension's metrics. Without this",
+    "entry the pipeline exists, the sync workflow fills its tables, and no record ever reaches",
+    "it - which looks exactly like a lookup table that did not work.",
+    "",
+    "THE MATCHER MUST NOT REFERENCE cohesity_protectiongroup_id. That field is created inside",
+    "the pipeline by the first processor, so gating entry on it means no record ever arrives",
+    "and the lookup never runs. metric.key is present before any processing and is the only",
+    "safe thing to match on here.",
+    "",
+    "WHY dt.host.cpu.usage. The rule needs a host metric that (a) exists on every",
+    "OneAgent-monitored host, (b) carries dt.smartscape.host, and (c) is ONE key rather than a",
+    "family, so the volume routed through the pipeline is one series per host rather than",
+    "dozens. A broader matcher costs pipeline throughput and buys nothing: the edge is drawn",
+    "from the first matching record and refreshed by every one after it.",
+    "",
+    "pipelineId is the SETTINGS OBJECT ID of the installed pipeline, not its customId",
+    "('extension:cohesity-host-link'). See dynatrace/README.md for how to read it off the",
+    "tenant."
+  ],
+  "enabled": true,
+  "pipelineType": "custom",
+  "pipelineId": "<pipeline-settings-object-id>",
+  "builtinPipelineId": "00000000-0000-0000-0000-000000000000",
+  "matcher": "matchesValue(metric.key, \"dt.host.cpu.usage\")",
+  "description": "Route host CPU metrics to the Cohesity host-link pipeline"
+}

@@ -1,5 +1,5 @@
 name: custom:cohesity.storage
-version: 0.1.3
+version: 0.1.9
 # Floor settled by ticket 03 against the release-tagged schema repo, not guessed. The binding
 # constraint is documents.screens (1.341); openpipeline smartscape lands earlier, at 1.330.
 minDynatraceVersion: "1.341.0"
@@ -72,6 +72,12 @@ python:
         - key: cohesity.protectiongroup.run.bytes_logical
         - key: cohesity.protectiongroup.run.objects
         - key: cohesity.protectiongroup.last_success.age
+    # Mirrors collectHostLink. OFF by default - the only feature set that is. It carries
+    # one series per protected VM, which is the cardinality ticket 04 ruled out of v1, so
+    # it is asked for rather than assumed. See the README on bounded scale.
+    - featureSet: host_link
+      metrics:
+        - key: cohesity.protectiongroup.protects
 
 # Metric-key PREFIX is what binds a metric to its Smartscape entity: the node-extraction rules
 # in openpipeline/metrics.pipeline.json match on `cohesity.cluster.*`,
@@ -193,6 +199,16 @@ metrics:
       displayName: Cohesity protection run objects
       description: Objects in a completed protection run, split by result - success or total
       unit: Count
+  - key: cohesity.protectiongroup.protects
+    metadata:
+      displayName: Cohesity protected object link
+      # A constant 1 that exists only to carry identity. Nothing charts it: the pair
+      # (cohesity.protectiongroup.id, cohesity.object.uuid) is read back out of Grail by the
+      # host-link workflow, which turns it into the OpenPipeline lookup table that draws the
+      # protection group -> HOST edge. Unit Count because the line protocol needs one, not
+      # because counting these means anything.
+      description: Always 1 - carries the VMware BIOS UUID of one object a protection group backs up, so it can be joined to a Dynatrace HOST
+      unit: Count
   - key: cohesity.protectiongroup.last_success.age
     metadata:
       displayName: Cohesity time since last successful run
@@ -216,6 +232,15 @@ openpipeline:
   pipelines:
     - displayName: Cohesity storage
       pipelinePath: openpipeline/metrics.pipeline.json
+      configScope: metrics
+    # The second pipeline runs on DYNATRACE's host metrics, not on this extension's. That is
+    # why it cannot be a stage of the one above: the source object routes this extension's
+    # metrics to that pipeline statically, and a host metric never enters it. Reaching host
+    # metrics needs a routing entry on the built-in metrics ingest, which an extension package
+    # cannot create - so this ships inert (empty lookup tables) and the routing entry plus the
+    # workflow that fills the tables are installed once, by hand. See dynatrace/README.md.
+    - displayName: Cohesity host link
+      pipelinePath: openpipeline/host-link.pipeline.json
       configScope: metrics
 
 # Ship the dashboard under the MODERN `documents:` key, not the legacy `dashboards:` one.

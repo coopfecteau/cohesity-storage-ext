@@ -62,6 +62,20 @@ class TestDefaults:
         assert config.request_timeout_seconds == 120
         assert config.enabled_collections == ("storage_domains", "views")
 
+    def test_the_run_fan_out_budget_defaults_and_is_settable(self):
+        # A per-poll request budget, not a limit on how many groups are monitored: the fan-out
+        # rotates, so a smaller number delays a group rather than excluding it.
+        assert ClusterConfig.from_dict(raw()).max_run_fanout_groups == 20
+        assert ClusterConfig.from_dict(raw(maxRunFanoutGroups=5)).max_run_fanout_groups == 5
+
+    def test_a_run_fan_out_budget_of_zero_is_rejected(self):
+        # Zero would silently stop every run metric on a cluster that needs the fan-out, and it
+        # would look like a quiet cluster - the exact failure v0.1.7 exists to end.
+        with pytest.raises(ConfigError) as raised:
+            ClusterConfig.from_dict(raw(maxRunFanoutGroups=0))
+
+        assert "between 1 and 500" in str(raised.value)
+
     def test_booleans_survive_the_string_forms_a_hand_written_activation_json_produces(self):
         config = ClusterConfig.from_dict(raw(verifyTls="false", collectViews="true"))
 

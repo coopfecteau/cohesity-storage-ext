@@ -214,12 +214,13 @@ class TestMonitoringConfiguration:
 
 
 class TestVerdicts:
-    def test_all_21_metric_keys_come_from_the_manifest(self):
+    def test_every_metric_key_comes_from_the_manifest(self):
         keys = loop.expected_metric_keys(
             (REPO_ROOT / "extension" / "extension.yaml").read_text(encoding="utf-8")
         )
 
-        assert len(keys) == 21
+        # 21 from ticket 06, plus cohesity.protectiongroup.protects from ticket 16.
+        assert len(keys) == 22
         assert loop.COLLECTION_SUCCESS in keys
 
     def test_metric_keys_match_with_or_without_a_grail_prefix(self):

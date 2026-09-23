@@ -16,13 +16,15 @@ its own namespaced id. Names ride along and are never part of an identity.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from cohesity_storage import domain, metrics
+from cohesity_storage import domain, errors, metrics
 from cohesity_storage.client import CLUSTER_STATS_CALLS, VIEW_METRICS, CohesityClient
 from cohesity_storage.config import ClusterConfig
+from cohesity_storage.errors import CohesityApiError, CohesityAuthError, annotate, error_facts
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures"
 CLUSTER_ID = "1234567890123456"
@@ -439,6 +441,49 @@ class TestProtectionRuns:
         }
         assert statuses == {"Succeeded", "Failed", "SucceededWithWarning", "Missed"}
 
+    def test_every_counted_outcome_carries_a_status_dimension(self, client):
+        """The whole of the customer-tenant bug, asserted at the chokepoint.
+
+        `by:{status}` answered `Succeeded 64` / `None 28`: a quarter of the counted runs had
+        no status dimension at all, and nothing anywhere said so. An empty value is dropped by
+        wire_dimensions - correctly - so the guarantee has to be that there is never an empty
+        value to drop.
+        """
+        samples = metrics.protection_run_samples(
+            CLUSTER_ID, CLUSTER_NAME, client.new_protection_runs(), client.protection_groups()
+        )
+
+        for sample in by_key(samples, "cohesity.protectiongroup.run.outcome"):
+            assert sample.dimensions.get(metrics.DIM_STATUS), sample.dimensions
+
+    def test_a_run_with_no_status_is_counted_as_unknown_rather_than_undimensioned(self):
+        # Counted, and visible. A run that is counted but unclassifiable is most of this
+        # metric's value gone; one dimensioned "unknown" is a number somebody can chart, alert
+        # on and go and investigate.
+        run = domain.ProtectionRun(
+            id="r-1", protection_group_id="g-1", protection_group_name="Archive-only", status=""
+        )
+
+        sample = by_key(
+            metrics.protection_run_samples(CLUSTER_ID, CLUSTER_NAME, [run]),
+            "cohesity.protectiongroup.run.outcome",
+        )[0]
+
+        assert sample.dimensions[metrics.DIM_STATUS] == "unknown"
+
+    def test_the_unknown_status_survives_the_wire_format(self):
+        # The dimension is only real if it reaches report_metric. "" would be dropped here.
+        run = domain.ProtectionRun(
+            id="r-1", protection_group_id="g-1", protection_group_name="Archive-only", status=""
+        )
+
+        sample = by_key(
+            metrics.protection_run_samples(CLUSTER_ID, CLUSTER_NAME, [run]),
+            "cohesity.protectiongroup.run.outcome",
+        )[0]
+
+        assert metrics.wire_dimensions(sample.dimensions)[metrics.DIM_STATUS] == "unknown"
+
     def test_a_second_poll_counts_nothing_twice(self, client):
         first = client.new_protection_runs()
         second = client.new_protection_runs()
@@ -507,6 +552,411 @@ class TestProtectionRuns:
 
         assert not by_key(samples, "cohesity.protectiongroup.run.duration")
         assert by_key(samples, "cohesity.protectiongroup.run.bytes_written")
+
+
+class TestDiagnosticLogEvents:
+    """The records that carry back the two facts a silent metric gap needs, and nothing else.
+
+    They exist because this extension's own log lines are not reaching Grail on the tenant it
+    was debugged against - which left "which entityId does this schema answer to" and "what does
+    this cluster call its usage fields" unreadable, and those were exactly the two answers
+    needed. Log ingest is a different path and it arrives.
+    """
+
+    VERSION_FACT = {
+        "kind": "cluster_version",
+        "version": "7.4.1_u2_release",
+        "nodeCount": 3,
+        "source": "https://cohesity.example/v2",
+    }
+    RESOLVED_FACT = {
+        "kind": "entity_id_probe",
+        "schema": "kSentryClusterStats",
+        "entityId": "778899",
+        "candidates": ["778899", "1234567890123456"],
+        "resolved": True,
+    }
+    FAILED_FACT = {
+        "kind": "entity_id_probe",
+        "schema": "kBridgeClusterStats",
+        "entityId": "",
+        "candidates": ["778899", "1234567890123456"],
+        "resolved": False,
+    }
+    FIELDS_FACT = {
+        "kind": "storage_domain_stats_fields",
+        "fields": ["dataInBytes", "localTierResiliencyImpactBytes", "logicalUsageBytes"],
+    }
+    PROBE_ERROR_FACT = {
+        "kind": "entity_id_probe",
+        "schema": "kBridgeClusterStats",
+        "entityId": "",
+        "candidates": ["1234", "5678"],
+        "attempts": ["1234=CohesityAuthError HTTP 403"],
+        "resolved": False,
+        "error": "CohesityAuthError",
+        "status": 403,
+        "path": "/stats/time-series-stats",
+        "params": ["schemaName", "metricNames", "entityId"],
+        "detail": "cohesity-prod: the cluster rejected the API key",
+    }
+    SECTION_FAILURE_FACT = {
+        "kind": "section_failure",
+        "section": "cluster time series",
+        "error": "CohesityAuthError",
+        "status": 403,
+        "path": "/stats/time-series-stats",
+        "params": ["schemaName", "metricNames", "entityId"],
+        "detail": "cohesity-prod: the cluster rejected the API key (HTTP 403 Forbidden)",
+    }
+
+    OBJECTS_FACT = {
+        "kind": "protected_objects",
+        "environment": "kVMware",
+        "objects": 142,
+        "fields": ["id", "name", "objectHash", "uuid", "vCenterSummary"],
+        "vmwareKey": "vCenterSummary",
+        "vmwareFields": ["isCloudEnv", "type"],
+        "uuids": [
+            {"value": "00112233-4455-6677-8899-aabbccddeeff", "verdict": "uuid-8-4-4-4-12"},
+            {"value": "5088628705619046646:1789472940012", "verdict": "numeric-id"},
+            {"value": "", "verdict": "missing"},
+        ],
+    }
+    OBJECTS_FAILED_FACT = {
+        "kind": "protected_objects",
+        "environment": "",
+        "objects": 0,
+        "error": "CohesityAuthError",
+        "status": 403,
+        "path": "/data-protect/protection-groups/g-1/runs",
+        "params": ["numRuns", "includeObjectDetails"],
+        "detail": "cohesity-prod: the cluster rejected the API key",
+    }
+
+    def events(self, *facts) -> list[dict]:
+        return metrics.diagnostic_log_events(CLUSTER_ID, CLUSTER_NAME, "7.4.1_u2", list(facts))
+
+    def one(self, fact) -> dict:
+        events = self.events(fact)
+        assert len(events) == 1
+        return events[0]
+
+    def test_every_record_carries_the_cluster_it_is_about(self, ):
+        for event in self.events(self.VERSION_FACT, self.RESOLVED_FACT, self.FIELDS_FACT):
+            assert event[metrics.DIM_CLUSTER_ID] == CLUSTER_ID
+            assert event[metrics.DIM_CLUSTER_NAME] == CLUSTER_NAME
+            assert event["cohesity.cluster.version"] == "7.4.1_u2"
+            assert event["log.source"] == metrics.LOG_SOURCE_DIAGNOSTICS
+
+    def test_an_unreported_version_says_so_rather_than_reading_as_blank(self):
+        events = metrics.diagnostic_log_events(CLUSTER_ID, CLUSTER_NAME, "", [self.VERSION_FACT])
+
+        assert events[0]["cohesity.cluster.version"] == "unreported"
+
+    def test_the_version_record_carries_the_software_version(self):
+        event = self.one(self.VERSION_FACT)
+
+        assert "7.4.1_u2_release" in event["content"]
+        assert event["severity"] == metrics.SEVERITY_INFO
+
+    def test_a_resolved_probe_names_the_winner_and_everything_tried(self):
+        event = self.one(self.RESOLVED_FACT)
+
+        assert event["severity"] == metrics.SEVERITY_INFO
+        assert event["cohesity.schema"] == "kSentryClusterStats"
+        assert event["cohesity.entity_id"] == "778899"
+        assert event["cohesity.entity_id_candidates"] == "778899, 1234567890123456"
+
+    def test_a_failed_probe_is_a_warning_that_still_names_the_candidates(self):
+        # The list of what was tried IS the state of the investigation; losing it would leave
+        # the next person exactly where this one started.
+        event = self.one(self.FAILED_FACT)
+
+        assert event["severity"] == metrics.SEVERITY_WARN
+        assert event["cohesity.entity_id"] == ""
+        assert "1234567890123456" in event["cohesity.entity_id_candidates"]
+
+    def test_the_stats_field_record_carries_names_and_no_values(self):
+        event = self.one(self.FIELDS_FACT)
+
+        assert event["cohesity.stats_fields"] == (
+            "dataInBytes, localTierResiliencyImpactBytes, logicalUsageBytes"
+        )
+        assert "3" in event["content"]
+
+    def test_a_cluster_that_publishes_absurdly_many_fields_is_capped(self):
+        fact = {"kind": "storage_domain_stats_fields", "fields": [f"f{n}" for n in range(500)]}
+
+        event = self.one(fact)
+
+        assert event["cohesity.stats_fields"].count(",") == metrics.MAX_DIAGNOSTIC_FIELDS - 1
+
+    def test_a_probe_that_raised_reads_as_an_error_and_keeps_what_it_learned(self):
+        # Empty and refused are different facts with different fixes, and before 0.1.5 the
+        # refused case produced no record at all.
+        event = self.one(self.PROBE_ERROR_FACT)
+
+        assert event["severity"] == metrics.SEVERITY_ERROR
+        assert event["cohesity.http_status"] == "403"
+        assert event["cohesity.entity_id_attempts"] == "1234=CohesityAuthError HTTP 403"
+        assert event["cohesity.entity_id_candidates"] == "1234, 5678"
+        assert "/stats/time-series-stats" in event["content"]
+
+    def test_the_object_probe_answers_ticket_16_in_one_sentence(self):
+        event = self.one(self.OBJECTS_FACT)
+
+        assert event["severity"] == metrics.SEVERITY_INFO
+        assert event["cohesity.object_environment"] == "kVMware"
+        assert event["cohesity.object_count"] == "142"
+        assert event["cohesity.object_fields"] == "id, name, objectHash, uuid, vCenterSummary"
+        assert event["cohesity.object_vmware_key"] == "vCenterSummary"
+        assert event["cohesity.object_vmware_fields"] == "isCloudEnv, type"
+        assert event["cohesity.object_uuid_verdicts"] == (
+            "uuid-8-4-4-4-12, numeric-id, missing"
+        )
+        assert "00112233-4455-6677-8899-aabbccddeeff" in event["cohesity.object_uuids"]
+        assert "vCenterSummary" in event["content"]
+
+    def test_the_object_probe_never_carries_an_object_name(self):
+        # "name" appears as a FIELD NAME and must never appear as a value. The whole record is
+        # searched rather than one field, because a name leaking into the sentence would be
+        # just as bad as one leaking into an attribute.
+        fact = dict(self.OBJECTS_FACT)
+        fact["uuids"] = [{"value": "00112233-4455-6677-8899-aabbccddeeff", "verdict": "uuid"}]
+
+        event = self.one(fact)
+
+        assert "PLACEHOLDER" not in json.dumps(event)
+        for value in event.values():
+            assert "web-server" not in str(value)
+        assert event["cohesity.object_fields"].split(", ") == fact["fields"]
+
+    def test_an_absent_uuid_reads_as_absent_rather_than_as_an_empty_gap(self):
+        event = self.one(self.OBJECTS_FACT)
+
+        assert "absent -> missing" in event["content"]
+
+    def test_a_cluster_with_no_vmware_block_is_told_so_in_capitals(self):
+        fact = {**self.OBJECTS_FACT, "vmwareKey": "", "vmwareFields": []}
+
+        event = self.one(fact)
+
+        assert "NO VMware-specific sub-object" in event["content"]
+
+    def test_no_objects_at_all_is_a_warning_that_closes_the_question(self):
+        fact = {"kind": "protected_objects", "environment": "kPhysical", "objects": 0}
+
+        event = self.one(fact)
+
+        assert event["severity"] == metrics.SEVERITY_WARN
+        assert "kPhysical" in event["content"]
+        assert event["cohesity.object_uuids"] == ""
+
+    def test_a_probe_that_failed_is_a_warning_not_an_error(self):
+        # No metric is missing because of it, and calling it an ERROR would train someone to
+        # ignore the ERRORs that do mean a metric is gone.
+        event = self.one(self.OBJECTS_FAILED_FACT)
+
+        assert event["severity"] == metrics.SEVERITY_WARN
+        assert event["cohesity.http_status"] == "403"
+        assert "Protection-run collection is unaffected" in event["content"]
+
+    def test_a_section_failure_names_the_section_the_status_and_the_path(self):
+        event = self.one(self.SECTION_FAILURE_FACT)
+
+        assert event["severity"] == metrics.SEVERITY_ERROR
+        assert event["cohesity.section"] == "cluster time series"
+        assert event["cohesity.error"] == "CohesityAuthError"
+        assert event["cohesity.http_status"] == "403"
+        assert event["cohesity.path"] == "/stats/time-series-stats"
+        for piece in ("cluster time series", "403", "/stats/time-series-stats"):
+            assert piece in event["content"]
+
+    def test_a_section_failure_carries_parameter_names_and_no_parameter_values(self):
+        event = self.one(self.SECTION_FAILURE_FACT)
+
+        assert event["cohesity.query_params"] == "schemaName, metricNames, entityId"
+        # Names, so the call is identifiable. No "name=value" anywhere, because the value is
+        # how an entityId, a time window or one day a token ends up in a log stream.
+        assert "=" not in event["cohesity.query_params"]
+        assert "entityId=" not in json.dumps(event)
+
+    def test_a_failure_with_no_request_behind_it_says_so_rather_than_inventing_one(self):
+        fact = {"kind": "section_failure", "section": "views", "error": "KeyError"}
+
+        event = self.one(fact)
+
+        assert event["cohesity.http_status"] == ""
+        assert event["cohesity.path"] == ""
+        assert "no single endpoint" in event["content"]
+
+    def test_a_secret_the_error_message_embedded_never_reaches_the_record(self):
+        # The auth message names the credential vault entry on purpose - a rejected credential
+        # and an unresolved one have different fixes. A log record has a wider audience than
+        # the ActiveGate's own logs, so it comes back out on the way to Grail.
+        secret = "Ab3kQ9zR7mT1xW5vN2pL8sD4"
+        error = CohesityAuthError(
+            f"cohesity-prod: the cluster rejected apiKey={secret}, read from credential "
+            f"vault entry {secret} (HTTP 403 Forbidden)"
+        )
+        annotate(error, path="/stats/top-views", params=("metric",), status=403)
+        fact = {"kind": "section_failure", "section": "views", **error_facts(error, (secret,))}
+
+        event = self.one(fact)
+
+        assert secret not in json.dumps(event)
+        assert "[redacted]" in event["cohesity.detail"]
+        # Redacting must not cost the part that says what to do about it.
+        assert event["cohesity.http_status"] == "403"
+        assert "403" in event["content"]
+
+    def test_a_credential_shaped_string_nobody_configured_is_dropped_too(self):
+        # Not every secret in a message is one this process holds - the cluster can echo one
+        # back. Shape, not identity, is the only defence available for those.
+        error = CohesityApiError("cohesity-prod: /stats/views refused token=Zz09QqWwEeRrTtYyUu11")
+
+        event = self.one({"kind": "section_failure", "section": "views", **error_facts(error)})
+
+        assert "Zz09QqWwEeRrTtYyUu11" not in json.dumps(event)
+
+    def test_a_failure_detail_cannot_become_the_log_stream(self):
+        error = CohesityApiError("x" * 5000)
+
+        fact = error_facts(error)
+
+        assert len(fact["detail"]) <= errors.MAX_ERROR_DETAIL_CHARS
+
+    VARIANT_RESOLVED_FACT = {
+        "kind": "param_variant",
+        "path": "/stats/time-series-stats",
+        "variant": "no-rollupIntervalSecs",
+        "attempts": ["metricNames-repeated=CohesityApiError HTTP 500", "no-rollupIntervalSecs=ok"],
+        "requests": 2,
+        "resolved": True,
+    }
+    VARIANT_FAILED_FACT = {
+        "kind": "param_variant",
+        "path": "/stats/top-views",
+        "variant": "",
+        "attempts": ["no-protocol=CohesityApiError HTTP 500", "metric-only=CohesityApiError HTTP 500"],
+        "requests": 4,
+        "resolved": False,
+        "error": "CohesityApiError",
+        "status": 500,
+        "params": ["metric", "numTopViews"],
+        "detail": "cohesity-prod: /stats/top-views failed on the cluster side",
+    }
+    RUNS_SOURCE_FACT = {
+        "kind": "runs_source",
+        "source": "protection-runs",
+        "attempts": ["runs/summary=CohesityConnectError", "protection-runs=ok"],
+        "runs": 4,
+    }
+
+    def test_a_working_parameter_shape_is_named_along_with_what_it_cost(self):
+        event = self.one(self.VARIANT_RESOLVED_FACT)
+
+        # A warning, not an info: the endpoint is working again, and it is still broken.
+        assert event["severity"] == metrics.SEVERITY_WARN
+        assert event["cohesity.variant"] == "no-rollupIntervalSecs"
+        assert event["cohesity.path"] == "/stats/time-series-stats"
+        assert event["cohesity.variant_requests"] == "2"
+        assert "no-rollupIntervalSecs=ok" in event["cohesity.variant_attempts"]
+
+    def test_a_probe_that_found_nothing_says_what_it_tried(self):
+        # The list of shapes tried IS the state of the investigation, exactly as the candidate
+        # list is for the entityId probe.
+        event = self.one(self.VARIANT_FAILED_FACT)
+
+        assert event["severity"] == metrics.SEVERITY_ERROR
+        assert event["cohesity.variant"] == ""
+        assert event["cohesity.http_status"] == "500"
+        assert "no-protocol" in event["cohesity.variant_attempts"]
+        assert "metric-only" in event["content"]
+
+    def test_the_runs_endpoint_that_answered_is_named(self):
+        # The run metrics carry the same keys whichever endpoint produced them, so this record
+        # is the only place the answer to "which one worked" exists.
+        event = self.one(self.RUNS_SOURCE_FACT)
+
+        assert event["severity"] == metrics.SEVERITY_WARN
+        assert event["cohesity.runs_source"] == "protection-runs"
+        assert "runs/summary=" in event["cohesity.runs_attempts"]
+        assert "4 run(s)" in event["content"]
+
+    def test_the_documented_runs_endpoint_working_is_not_a_warning(self):
+        fact = {**self.RUNS_SOURCE_FACT, "source": "runs/summary", "attempts": ["runs/summary=ok"]}
+
+        assert self.one(fact)["severity"] == metrics.SEVERITY_INFO
+
+    def test_no_runs_endpoint_answering_reads_as_an_error_not_as_a_quiet_cluster(self):
+        # Twenty-four hours of zero looked like a quiet cluster and was three broken endpoints.
+        fact = {
+            "kind": "runs_source",
+            "source": "",
+            "attempts": ["runs/summary=CohesityConnectError"],
+            "runs": 0,
+            "error": "CohesityConnectError",
+            "status": None,
+            "path": "/data-protect/runs/summary",
+            "params": ["startTimeUsecs", "endTimeUsecs"],
+            "detail": "did not answer within 120s",
+        }
+
+        event = self.one(fact)
+
+        assert event["severity"] == metrics.SEVERITY_ERROR
+        assert event["cohesity.runs_source"] == ""
+        assert "no run outcome" in event["content"]
+        assert event["cohesity.query_params"] == "startTimeUsecs, endTimeUsecs"
+
+    RUNS_FANOUT_FACT = {
+        "kind": "runs_fanout",
+        "groups_total": 42,
+        "groups_queried": 20,
+        "groups_errored": 0,
+        "runs_per_group": 3,
+        "requests": 20,
+        "runs_seen": 14,
+        "runs_new": 2,
+    }
+
+    def test_the_fan_out_record_separates_a_quiet_cluster_from_a_blind_extension(self):
+        # v0.1.6 reported "0 run(s) in the window" for twenty minutes and there was no way to
+        # tell whether the fan-out was asking the right groups. These three counts are the way.
+        event = self.one(self.RUNS_FANOUT_FACT)
+
+        assert event["severity"] == metrics.SEVERITY_INFO
+        assert event["cohesity.runs_groups_queried"] == "20"
+        assert event["cohesity.runs_groups_total"] == "42"
+        assert event["cohesity.runs_seen"] == "14"
+        assert event["cohesity.runs_new"] == "2"
+        assert "20 of 42" in event["content"]
+
+    def test_groups_that_did_not_answer_make_the_fan_out_record_a_warning(self):
+        # A fan-out that half worked reports runs and is still a fault - on a cluster already
+        # answering HTTP 500 from two endpoints, that is the difference worth seeing.
+        fact = {**self.RUNS_FANOUT_FACT, "groups_errored": 4}
+
+        event = self.one(fact)
+
+        assert event["severity"] == metrics.SEVERITY_WARN
+        assert event["cohesity.runs_groups_errored"] == "4"
+
+    def test_a_fact_kind_nobody_wrote_a_record_for_is_dropped_not_guessed_at(self):
+        assert self.events({"kind": "something_invented_later"}) == []
+        assert self.events({}) == []
+
+    def test_no_record_carries_a_value_from_the_cluster(self):
+        # Names of things, never values of things. A capacity figure or a key in the log stream
+        # would be a different decision from the one this was meant to be.
+        events = self.events(self.VERSION_FACT, self.RESOLVED_FACT, self.FAILED_FACT, self.FIELDS_FACT)
+
+        text = json.dumps(events)
+        assert "219902325555200" not in text
+        assert "demo-key" not in text
+        assert "apiKey" not in text
 
 
 class TestWholePoll:

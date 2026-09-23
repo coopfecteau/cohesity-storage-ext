@@ -58,6 +58,7 @@ class TestMetricKeys:
         "cohesity.protectiongroup.run.bytes_logical",
         "cohesity.protectiongroup.run.objects",
         "cohesity.protectiongroup.last_success.age",
+        "cohesity.protectiongroup.protects",
     }
 
     def test_the_key_set_is_exactly_ticket_06s_contract(self):
@@ -145,6 +146,12 @@ class TestDimensionKeys:
 
         assert metrics.DIM_PAUSED not in dimensions
         assert dimensions[metrics.DIM_ACTIVE] == "true"
+
+    def test_the_join_key_is_cohesity_prefixed_and_lowercase(self):
+        # Lowercase because the ingest protocol rejects any dimension key with an uppercase
+        # letter - silently, as an "invalid metric lines" count with no key attached.
+        assert metrics.DIM_OBJECT_UUID == "cohesity.object.uuid"
+        assert not [char for char in metrics.DIM_OBJECT_UUID if char.isupper()]
 
     def test_every_dimension_value_is_a_string(self):
         dimensions = metrics.protection_group_dimensions(

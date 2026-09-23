@@ -65,6 +65,9 @@ FAKE_CLUSTER = {
 }
 
 NODE_TYPES = ("EXT_COHESITY_CLUSTER", "EXT_COHESITY_STORAGE_DOMAIN", "EXT_COHESITY_PROTECTION_GROUP")
+# Both containment edges are the built-in "contains" type, which works: 0.1.5 renamed them
+# because a filtered DQL query returned 0, and that query returns 0 for writes_to too. See
+# the topology section of the README for why the filter, not the edge, was the problem.
 EDGES = (
     ("contains", "EXT_COHESITY_CLUSTER", "EXT_COHESITY_STORAGE_DOMAIN"),
     ("contains", "EXT_COHESITY_CLUSTER", "EXT_COHESITY_PROTECTION_GROUP"),
@@ -374,7 +377,7 @@ def extension_version(yaml_text: str) -> str:
 
 
 def expected_metric_keys(yaml_text: str) -> list[str]:
-    """Every metric key the manifest declares - the contract ticket 06 fixed at 21."""
+    """Every metric key the manifest declares - ticket 06's 21, plus ticket 16's bridge."""
     return sorted(set(re.findall(r"^\s*-\s*key:\s*(\S+)\s*$", yaml_text, re.MULTILINE)))
 
 
@@ -494,8 +497,10 @@ def monitoring_value(version: str, group: str) -> dict[str, Any]:
         "description": f"cohesity e2e on ag_group-{group} - SYNTHETIC fake cluster, managed by e2e/loop.py",
         "version": version,
         "activationContext": "REMOTE",
-        # "default" is always on and cannot be listed off; these mirror the three toggles.
-        "featureSets": ["storage_domains", "views", "protection"],
+        # "default" is always on and cannot be listed off; these mirror the four toggles.
+        # host_link is listed AND switched on below: it is off by default in production
+        # because of its cardinality, so e2e is the only place that proves it runs at all.
+        "featureSets": ["storage_domains", "views", "protection", "host_link"],
         "pythonRemote": {
             "endpoints": [
                 {
@@ -509,6 +514,8 @@ def monitoring_value(version: str, group: str) -> dict[str, Any]:
                     "collectStorageDomains": True,
                     "collectViews": True,
                     "collectProtection": True,
+                    "collectHostLink": True,
+                    "maxHostLinkObjects": 200,
                     "intervalMinutes": 1,
                     "requestTimeoutSeconds": 30,
                 }

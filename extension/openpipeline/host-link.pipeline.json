@@ -1,0 +1,77 @@
+{
+  "displayName": "Cohesity host link",
+  "customId": "extension:cohesity-host-link",
+  "metadataList": [],
+  "processing": {
+    "processors": [
+      {
+        "id": "cohesity-host-link.protection-group-lookup",
+        "description": "Which Cohesity protection group backs up this host, keyed on the host's own Smartscape id. Ships EMPTY so the pipeline is inert until the sync workflow populates it; no defaultValue, so a host with no Cohesity backup is left completely untouched. See README 'Linking protection groups to hosts'.",
+        "type": "inlineLookup",
+        "enabled": true,
+        "matcher": "matchesValue(metric.key, \"dt.host.cpu.usage\")",
+        "inlineLookup": {
+          "sourceField": "dt.smartscape.host",
+          "destinationField": "cohesity_protectiongroup_id",
+          "inlineLookupTable": "[[[\"__cohesity_host_link_unpopulated__\"],\"\"]]"
+        }
+      },
+      {
+        "id": "cohesity-host-link.cluster-lookup",
+        "description": "The Cohesity cluster id for the same host. A second lookup because the protection group's node id is built from TWO components and the extension emits them separately: the raw cluster id, and the group id already namespaced as {clusterId}_{groupId}. One table cannot carry both values for one key.",
+        "type": "inlineLookup",
+        "enabled": true,
+        "matcher": "matchesValue(metric.key, \"dt.host.cpu.usage\")",
+        "inlineLookup": {
+          "sourceField": "dt.smartscape.host",
+          "destinationField": "cohesity_cluster_id",
+          "inlineLookupTable": "[[[\"__cohesity_host_link_unpopulated__\"],\"\"]]"
+        }
+      }
+    ]
+  },
+  "smartscapeNodeExtraction": {
+    "processors": [
+      {
+        "id": "cohesity-host-link.protection-group-id",
+        "description": "Computes the id of the protection group entity the extension's own metrics already create, WITHOUT creating a second one - extractNode is false. The idComponents and their order mirror cohesity-protection-group-node exactly; a different name or order yields a different id, which resolves to an empty duplicate entity rather than failing.",
+        "type": "smartscapeNode",
+        "enabled": true,
+        "matcher": "matchesValue(metric.key, \"dt.host.cpu.usage\") and isNotNull(cohesity_cluster_id) and isNotNull(cohesity_protectiongroup_id)",
+        "smartscapeNode": {
+          "nodeType": "EXT_COHESITY_PROTECTION_GROUP",
+          "nodeIdFieldName": "dt.smartscape.cohesity_protection_group",
+          "idComponents": [
+            {
+              "idComponent": "cluster_id",
+              "referencedFieldName": "cohesity_cluster_id"
+            },
+            {
+              "idComponent": "protectiongroup_id",
+              "referencedFieldName": "cohesity_protectiongroup_id"
+            }
+          ],
+          "extractNode": false
+        }
+      }
+    ]
+  },
+  "smartscapeEdgeExtraction": {
+    "processors": [
+      {
+        "id": "cohesity-host-link.protects-host",
+        "description": "The edge ticket 16 exists for: a backup job, joined to the infrastructure Dynatrace already monitors. Source is the protection group because 'protects' reads with the actor first, and because custom-source to built-in-target is the direction proven to validate server-side. The HOST is resolved, never minted - Dynatrace owns it.",
+        "type": "smartscapeEdge",
+        "enabled": true,
+        "matcher": "matchesValue(metric.key, \"dt.host.cpu.usage\") and isNotNull(cohesity_cluster_id) and isNotNull(cohesity_protectiongroup_id)",
+        "smartscapeEdge": {
+          "sourceType": "EXT_COHESITY_PROTECTION_GROUP",
+          "sourceIdFieldName": "dt.smartscape.cohesity_protection_group",
+          "edgeType": "protects",
+          "targetType": "HOST",
+          "targetIdFieldName": "dt.smartscape.host"
+        }
+      }
+    ]
+  }
+}

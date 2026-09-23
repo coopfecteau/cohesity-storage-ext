@@ -27,6 +27,8 @@ from .errors import (
     CohesityAuthError,
     CohesityConnectError,
     CohesityEndpointError,
+    CohesityError,
+    annotate,
 )
 from .fixtures import Fixture, FixtureStore
 
@@ -34,6 +36,27 @@ from .fixtures import Fixture, FixtureStore
 # published under "v1-cluster-<version>" slugs, which is portal versioning, not API versioning:
 # every page in them declares COHESITY REST API V2 and a /v2 server URL.
 API_PREFIX = "/v2"
+
+# The legacy "public" API is served from its own prefix on the same VIP. Nothing in the metric
+# set comes from it; it is reachable only so the entityId probe can ask v1 /public/cluster for
+# the id Cohesity's own community exporters pass to every cluster-level time-series call.
+V1_PREFIX = "/irisservices/api/v1"
+
+
+class Repeated(tuple):
+    """Query values to send as repeated ``name=value`` pairs rather than comma-joined.
+
+    The opposite of what :func:`encode_params` does to every other sequence, and deliberately
+    hard to reach. Cohesity declares ``metricNames`` as ``explode: false``, so the comma-joined
+    form is the documented one and the repeated form is the mistake most HTTP clients make by
+    default - the cluster then reads only the last value and the series is silently empty.
+
+    This type exists for exactly one caller: the parameter-variant probe in :mod:`.client`,
+    which has to be able to ask the *un*documented shape when a cluster answers HTTP 500 to the
+    documented one. Nothing else should construct one.
+    """
+
+    __slots__ = ()
 
 
 class HttpTransport:
@@ -53,18 +76,26 @@ class HttpTransport:
     def describe(self) -> str:
         return f"{self._config.base_url}{API_PREFIX}"
 
-    def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    def get(
+        self, path: str, params: dict[str, Any] | None = None, *, prefix: str = API_PREFIX
+    ) -> Any:
         """GET a JSON document from the cluster.
+
+        ``prefix`` exists only for the one v1 call the entityId probe makes; everything else
+        takes the default and stays on /v2.
 
         Raises:
             CohesityAuthError, CohesityConnectError, CohesityEndpointError, CohesityApiError:
                 each with a message naming the cluster, saying what to do, and keeping the raw
                 error as a suffix.
         """
-        url = f"{self._config.base_url}{API_PREFIX}{path}"
+        url = f"{self._config.base_url}{prefix}{path}"
         query = encode_params(params)
         if query:
             url = f"{url}?{query}"
+        # Names, never values. Every failure below carries these so a diagnostic can say which
+        # call went wrong without anyone having to guess from the sentence.
+        param_names = tuple(params or ())
 
         request = urllib.request.Request(  # noqa: S310 - scheme is fixed https by base_url
             url,
@@ -84,22 +115,33 @@ class HttpTransport:
             ) as response:
                 body = response.read()
         except urllib.error.HTTPError as exception:
-            raise self._http_error(path, exception) from exception
+            error = self._http_error(path, exception)
+            raise annotate(
+                error, path=path, params=param_names, status=exception.code
+            ) from exception
         except urllib.error.URLError as exception:
-            raise self._url_error(path, exception) from exception
+            error = self._url_error(path, exception)
+            raise annotate(error, path=path, params=param_names) from exception
         except ssl.SSLError as exception:
             # Reached when the handshake fails outside a URLError wrapper, which happens for
             # protocol-version and cipher mismatches against older cluster TLS stacks.
-            raise self._tls_error(exception) from exception
+            raise annotate(self._tls_error(exception), path=path, params=param_names) from exception
         except TimeoutError as exception:
             msg = (
                 f"{self._config.name}: {path} did not answer within "
                 f"{self._config.request_timeout_seconds}s. Raise the request timeout, or check "
                 f"whether the cluster is under load ({exception})"
             )
-            raise CohesityConnectError(msg) from exception
+            error = CohesityConnectError(msg)
+            raise annotate(error, path=path, params=param_names) from exception
 
-        return self._decode(path, body)
+        try:
+            return self._decode(path, body)
+        except CohesityError as exception:
+            # Annotated rather than rebuilt: a body that is not JSON is still a failure of this
+            # request, and the diagnostic wants to name it like any other.
+            annotate(exception, path=path, params=param_names)
+            raise
 
     def _http_error(self, path: str, exception: urllib.error.HTTPError):
         if exception.code in (401, 403):
@@ -200,10 +242,18 @@ class FixtureTransport:
     def describe(self) -> str:
         return f"replay from {self.store.directory}"
 
-    def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    def get(
+        self, path: str, params: dict[str, Any] | None = None, *, prefix: str = API_PREFIX
+    ) -> Any:
         # Keyed off the full request path, prefix included, so a fixture file name matches what
         # the fake server sees on the wire and a capture can be dropped straight in.
-        fixture = self.store.get(f"{API_PREFIX}{path}", params)
+        try:
+            fixture = self.store.get(f"{prefix}{path}", params)
+        except CohesityError as exception:
+            # Replay has to produce the same failure shape as the wire, diagnostics included,
+            # or a missing fixture is the one failure the tests cannot see reported.
+            annotate(exception, path=path, params=tuple(params or ()))
+            raise
         self.served.append(fixture)
         return fixture.body
 
@@ -230,21 +280,26 @@ def encode_params(params: dict[str, Any] | None) -> str:
     ``metricNames`` on /v2/stats/time-series-stats is ``style: form, explode: false``, i.e.
     ``metricNames=kReadIos,kWriteIos`` in ONE parameter - not repeated. Most HTTP clients
     default to the repeated form and the cluster then reads only the last value. Joining lists
-    here makes the repeated form unreachable rather than merely discouraged.
+    here makes the repeated form unreachable rather than merely discouraged - the one exception
+    being a value explicitly wrapped in :class:`Repeated`, which is how the variant probe asks
+    for the undocumented shape on a cluster that rejects the documented one.
     """
     if not params:
         return ""
-    flat: dict[str, str] = {}
+    pairs: list[tuple[str, str]] = []
     for name, value in params.items():
         if value is None:
             continue
-        if isinstance(value, (list, tuple)):
-            flat[name] = ",".join(str(item) for item in value)
+        # Checked before the sequence branch below, because Repeated *is* a tuple.
+        if isinstance(value, Repeated):
+            pairs.extend((name, str(item)) for item in value)
+        elif isinstance(value, (list, tuple)):
+            pairs.append((name, ",".join(str(item) for item in value)))
         elif isinstance(value, bool):
-            flat[name] = "true" if value else "false"
+            pairs.append((name, "true" if value else "false"))
         else:
-            flat[name] = str(value)
-    return urllib.parse.urlencode(flat)
+            pairs.append((name, str(value)))
+    return urllib.parse.urlencode(pairs)
 
 
 def build_ssl_context(config: ClusterConfig) -> ssl.SSLContext:

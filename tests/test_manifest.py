@@ -314,6 +314,29 @@ class TestSmartscapeEdges:
             ("EXT_COHESITY_PROTECTION_GROUP", "writes_to", "EXT_COHESITY_STORAGE_DOMAIN"),
         }
 
+    def test_containment_uses_the_built_in_edge_type(self, pipeline):
+        """0.1.5 renamed both containment edges, and it should not have.
+
+        The rename was made on a DQL reading: ``smartscapeEdges "contains" | filter
+        startsWith(source_id, "EXT_COHESITY")`` returned 0. So does the same query for
+        ``writes_to``, which demonstrably has 42 edges - the ``startsWith`` filter on
+        ``source_id`` in ``smartscapeEdges`` silently matches nothing. Counting the unfiltered
+        rows instead shows ``contains`` carrying 51 Cohesity edges and always having done.
+
+        Asserted as the intended edge type rather than as a blocklist, because the blocklist
+        encoded the wrong conclusion: a built-in edge type is fine here, and the two spellings
+        coexisting is what produced duplicate edges for one relationship.
+        """
+        containment = [
+            processor
+            for processor in edge_processors(pipeline)
+            if processor["smartscapeEdge"]["sourceType"] == "EXT_COHESITY_CLUSTER"
+        ]
+
+        assert len(containment) == 2
+        for processor in containment:
+            assert processor["smartscapeEdge"]["edgeType"] == "contains", processor["id"]
+
     def test_edge_types_are_lowercase_and_within_the_length_limit(self, pipeline):
         for processor in edge_processors(pipeline):
             edge_type = processor["smartscapeEdge"]["edgeType"]
@@ -458,6 +481,7 @@ def dashboard_queries(dashboard: dict) -> dict[str, str]:
     }
 
 
+
 class TestDashboard:
     def test_it_ships_under_the_modern_documents_key(self, manifest):
         # `dashboards:` is Dashboards Classic, deprecated since January 2026 and targeted for
@@ -570,3 +594,238 @@ class TestDashboard:
         for tile_id, query in dashboard_queries(dashboard).items():
             assert "from:" not in query, tile_id
             assert "timeframe:" not in query.replace("| fields timeframe", ""), tile_id
+
+
+HOST_LINK_PATH = EXTENSION_DIR / "openpipeline" / "host-link.pipeline.json"
+
+# The metric the host-link pipeline is routed on. Dynatrace's, not ours - which is the whole
+# reason that pipeline is a second settings object rather than a stage of the first one.
+HOST_METRIC_KEY = "dt.host.cpu.usage"
+
+
+@pytest.fixture(scope="module")
+def host_link() -> dict:
+    return json.loads(HOST_LINK_PATH.read_text(encoding="utf-8"))
+
+
+def lookup_processors(host_link: dict) -> list[dict]:
+    return host_link["processing"]["processors"]
+
+
+class TestHostLinkPipeline:
+    """The second pipeline (ticket 16), which runs on HOST metrics rather than on ours.
+
+    It is a separate settings object on purpose: the extension's own source statically routes
+    the extension's own metrics to the first pipeline, and a host metric never enters it.
+    Reaching host metrics needs a routing entry on the built-in ingest, which an extension
+    package cannot create - so this one ships inert and is wired up by hand.
+    """
+
+    def test_it_is_declared_in_the_manifest_and_present_on_disk(self, manifest):
+        declared = {
+            entry["pipelinePath"] for entry in manifest["openpipeline"]["pipelines"]
+        }
+
+        assert "openpipeline/host-link.pipeline.json" in declared
+        assert HOST_LINK_PATH.is_file()
+        for entry in manifest["openpipeline"]["pipelines"]:
+            assert entry["configScope"] == "metrics"
+
+    def test_its_custom_id_does_not_collide_with_the_metrics_pipeline(self, pipeline, host_link):
+        # Two pipelines sharing a customId is one pipeline, silently.
+        assert host_link["customId"] != pipeline["customId"]
+
+    def test_nothing_routes_this_extensions_own_metrics_into_it(self, host_link):
+        """The extension's source must keep pointing at the metrics pipeline.
+
+        Routing our own metrics here instead would silently stop every Cohesity entity from
+        being created - the node rules live in the other file.
+        """
+        source = json.loads(SOURCE_PATH.read_text(encoding="utf-8"))
+
+        assert source["staticRouting"]["pipelineId"] != host_link["customId"]
+
+    def test_it_ships_an_empty_lookup_table_so_it_is_inert_until_populated(self, host_link):
+        processors = lookup_processors(host_link)
+
+        assert processors, "no inlineLookup processor to populate"
+        for processor in processors:
+            assert processor["type"] == "inlineLookup"
+            assert "__cohesity_host_link_unpopulated__" in processor["inlineLookup"]["inlineLookupTable"]
+            # No defaultValue: a host with no Cohesity backup must be left completely
+            # untouched rather than given a placeholder that draws an edge to nothing.
+            assert "defaultValue" not in processor["inlineLookup"]
+
+    def test_both_lookups_key_on_the_host_smartscape_id(self, host_link):
+        # The one field on a host metric that identifies the entity the edge points at, and the
+        # only thing a workflow can populate a table with.
+        for processor in lookup_processors(host_link):
+            assert processor["inlineLookup"]["sourceField"] == "dt.smartscape.host"
+
+    def test_every_field_the_rules_read_is_one_a_lookup_creates(self, host_link):
+        """The host-link equivalent of the emitted-dimensions check on the other pipeline.
+
+        Its node and edge rules cannot read `cohesity.*` dimensions - those ride on Cohesity
+        metrics, and this pipeline only ever sees host metrics. Everything they read must
+        therefore be produced by an inlineLookup in this same file, or be a built-in host
+        field. A name that is neither matches nothing, silently and forever.
+        """
+        produced = {
+            processor["inlineLookup"]["destinationField"]
+            for processor in lookup_processors(host_link)
+        } | {"dt.smartscape.host"}
+
+        for processor in node_processors(host_link) + edge_processors(host_link):
+            for fragment in processor["matcher"].split("isNotNull(")[1:]:
+                assert fragment.split(")")[0] in produced, processor["id"]
+            for entry in processor.get("smartscapeNode", {}).get("idComponents", []):
+                assert entry["referencedFieldName"] in produced, processor["id"]
+
+    def test_the_lookup_values_are_dimensions_the_python_actually_emits(self, host_link):
+        """A table is only fillable if the extension publishes what goes in it.
+
+        The two destination fields correspond one-for-one to the bridge metric's two identity
+        dimensions; the workflow copies those values across verbatim. If the Python renamed
+        one, there would be nothing to put in the table and no error to say so.
+        """
+        destinations = {
+            processor["inlineLookup"]["destinationField"]
+            for processor in lookup_processors(host_link)
+        }
+
+        assert destinations == {
+            metrics.DIM_CLUSTER_ID.replace(".", "_"),
+            metrics.DIM_PROTECTION_GROUP_ID.replace(".", "_"),
+        }
+
+    def test_the_computed_node_id_matches_the_extensions_own_rule_exactly(
+        self, pipeline, host_link
+    ):
+        """Same node type, same id field, same components, same ORDER.
+
+        This is the one thing that cannot be checked on a tenant without looking very closely:
+        a different component name or order produces a DIFFERENT id, and a different id
+        resolves to a second, empty copy of the protection group rather than failing.
+        """
+        ours = next(
+            processor["smartscapeNode"]
+            for processor in node_processors(pipeline)
+            if processor["id"] == "cohesity-protection-group-node"
+        )
+        theirs = next(
+            processor["smartscapeNode"]
+            for processor in node_processors(host_link)
+            if processor["smartscapeNode"]["nodeType"] == "EXT_COHESITY_PROTECTION_GROUP"
+        )
+
+        assert theirs["nodeType"] == ours["nodeType"]
+        assert theirs["nodeIdFieldName"] == ours["nodeIdFieldName"]
+        assert [entry["idComponent"] for entry in theirs["idComponents"]] == [
+            entry["idComponent"] for entry in ours["idComponents"]
+        ]
+
+    def test_it_resolves_the_protection_group_rather_than_minting_a_second_one(self, host_link):
+        for processor in node_processors(host_link):
+            assert processor["smartscapeNode"]["extractNode"] is False
+
+    def test_no_rule_here_extracts_a_host(self, host_link):
+        # Dynatrace owns HOST. Minting our own copy is the failure ticket 16 was written to
+        # avoid, and extractNode:false on our own type is only half of avoiding it.
+        for processor in node_processors(host_link):
+            assert processor["smartscapeNode"]["nodeType"] != "HOST"
+
+    def test_the_edge_runs_from_the_protection_group_to_the_host(self, host_link):
+        """Direction, stated once so it cannot drift.
+
+        'protects' reads with the actor first - the job protects the machine - and custom
+        source to built-in target is the direction whose server-side acceptance is
+        established. Reversed, HOST would sit in the source position, which is unverified.
+        """
+        edge = edge_processors(host_link)[0]["smartscapeEdge"]
+
+        assert edge["sourceType"] == "EXT_COHESITY_PROTECTION_GROUP"
+        assert edge["edgeType"] == "protects"
+        assert edge["targetType"] == "HOST"
+        assert edge["targetIdFieldName"] == "dt.smartscape.host"
+
+    def test_the_edge_type_fits_the_server_side_limit(self, host_link):
+        edge_type = edge_processors(host_link)[0]["smartscapeEdge"]["edgeType"]
+
+        assert edge_type == edge_type.lower()
+        assert len(edge_type) <= 32
+
+    def test_every_matcher_is_scoped_to_a_host_metric(self, host_link):
+        """Not to a Cohesity one. This pipeline never sees a Cohesity metric, and a matcher
+        naming one would make the whole pipeline dead weight on the host ingest path."""
+        for stage in ("processing", "smartscapeNodeExtraction", "smartscapeEdgeExtraction"):
+            for processor in host_link[stage]["processors"]:
+                assert f'matchesValue(metric.key, "{HOST_METRIC_KEY}")' in processor["matcher"]
+
+    def test_the_routing_sample_matches_on_that_same_metric_and_nothing_else(self):
+        """The routing matcher must NOT reference a field the pipeline itself creates.
+
+        Gating entry on `cohesity_protectiongroup_id` means no record ever arrives, the lookup
+        never runs, and the symptom is a lookup table that "did not work".
+        """
+        routing = json.loads(
+            (EXTENSION_DIR.parent / "dynatrace" / "routing-host-link.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        assert HOST_METRIC_KEY in routing["matcher"]
+        assert "cohesity_" not in routing["matcher"]
+
+    def test_its_processors_pass_the_same_hygiene_rules_as_the_others(self, pipeline, host_link):
+        ids = {processor["id"] for processor in node_processors(pipeline) + edge_processors(pipeline)}
+        for stage in ("processing", "smartscapeNodeExtraction", "smartscapeEdgeExtraction"):
+            for processor in host_link[stage]["processors"]:
+                identifier = processor["id"]
+                assert identifier not in ids, f"{identifier} collides with the metrics pipeline"
+                assert 4 <= len(identifier) <= 100, identifier
+                assert not identifier.startswith(("dt.", "dynatrace."))
+                assert processor["description"].strip()
+                assert processor["enabled"] is True
+                ids.add(identifier)
+
+
+def test_no_pipeline_processor_field_exceeds_its_server_limit(pipeline, host_link):
+    """A 544-char description was rejected at UPLOAD: "Size must be lower than or equal to 512".
+
+    --validate-only against the settings schema did NOT catch it - that validates the settings
+    object, while this limit is enforced on the packaged extension asset. Two different gates.
+    Keep a processor's rationale in the README, not in its description.
+    """
+    for document in (pipeline, host_link):
+        for stage in document.values():
+            if not isinstance(stage, dict):
+                continue
+            for processor in stage.get("processors", []):
+                assert len(processor.get("description", "")) <= 512, processor.get("id")
+                assert len(processor.get("id", "")) <= 100, processor.get("id")
+
+
+def test_inline_lookup_tables_ship_non_empty_but_unmatchable():
+    """The upload API rejects an empty inlineLookupTable ("Must not be empty"), yet the host-link
+    pipeline must stay inert until the sync workflow fills it. A sentinel key no Smartscape host
+    id can equal satisfies both. --validate-only does not catch this; it is an upload-time check.
+    """
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "extension" / "openpipeline"
+    for path in root.glob("*.json"):
+        document = json.loads(path.read_text(encoding="utf-8"))
+
+        def walk(node, name=path.name):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key == "inlineLookup" and isinstance(value, dict):
+                        table = value.get("inlineLookupTable")
+                        assert table not in ("", "[]", None, []), f"{name}: empty table"
+                    walk(value, name)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value, name)
+
+        walk(document)

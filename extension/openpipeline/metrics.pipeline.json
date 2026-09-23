@@ -154,8 +154,8 @@
   "smartscapeEdgeExtraction": {
     "processors": [
       {
-        "id": "cohesity-cluster-contains-storage-domain",
-        "description": "Containment: a storage domain lives on exactly one cluster. Drawn from the storage domain's own metrics, where both node ids are resolved.",
+        "id": "cohesity-cluster-has-storage-domain",
+        "description": "Containment: a storage domain lives on exactly one cluster. 'contains' is a built-in edge type and it does carry these edges - 0.1.5 renamed both containment edges on the strength of a DQL filter that silently matched nothing, and 0.1.6 puts them back.",
         "type": "smartscapeEdge",
         "enabled": true,
         "matcher": "matchesValue(metric.key, \"cohesity.storagedomain.*\") and isNotNull(cohesity.cluster.id) and isNotNull(cohesity.storagedomain.id)",
@@ -168,8 +168,8 @@
         }
       },
       {
-        "id": "cohesity-cluster-contains-protection-group",
-        "description": "Containment: a protection group is defined on exactly one cluster.",
+        "id": "cohesity-cluster-has-protection-group",
+        "description": "Containment: a protection group is defined on exactly one cluster. Spelled 'contains', the built-in containment edge type, which works here: the 0.1.5 rename to has_protection_group was made on a measurement error and is reverted in 0.1.6.",
         "type": "smartscapeEdge",
         "enabled": true,
         "matcher": "matchesValue(metric.key, \"cohesity.protectiongroup.*\") and isNotNull(cohesity.cluster.id) and isNotNull(cohesity.protectiongroup.id)",

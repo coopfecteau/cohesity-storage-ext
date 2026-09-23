@@ -1,0 +1,176 @@
+{
+  "_fixture": {
+    "provenance": "synthetic",
+    "description": "The same five runs as v2_data-protect_runs_summary, in the run-LIST shape: facts under localBackupInfo, bytes under localSnapshotStats, times spelled runStartTimeUsecs. Serves the two fallbacks the client reaches for when runs/summary times out, and - on the kVMware runs only - the objects[] array that includeObjectDetails=true adds, which is what the v0.1.8 protected-object probe reads.",
+    "source": "https://developers.cohesity.com/v1-cluster-7.4/reference/getprotectiongroupruns.md",
+    "capturedAt": null,
+    "clusterVersion": "7.4",
+    "warning": "SYNTHETIC, and thinner evidence than most. /v2/data-protect/protection-runs is not in the 7.3.2 reference this extension was written from at all - only the per-group /protection-groups/{id}/runs is - so this body is the per-group response shape used for both, which is exactly why domain.parse_run_list accepts either spelling of every field rather than trusting this file. Run ids MATCH the runs/summary fixture on purpose: the same run reported by two endpoints must be counted once, and that is only demonstrable if the ids agree. The objects[] arrays are the most invented part of this file: objects[].object is modelled straight from GetProtectionGroupRuns' ProtectionRunObject schema and NOBODY HAS SEEN IT ON A CLUSTER. That is precisely why the probe exists - do not read the uuid values here as evidence that a real cluster publishes BIOS UUIDs. The names are obvious placeholders so that a test asserting no object name ever reaches a diagnostic is asserting something."
+  },
+  "body": {
+    "totalRuns": 5,
+    "isResponseTruncated": false,
+    "runs": [
+      {
+        "id": "r-70001",
+        "protectionGroupId": "g-9001",
+        "protectionGroupName": "Nightly-VMware-Tier1",
+        "environment": "kVMware",
+        "isFullRun": true,
+        "localBackupInfo": {
+          "status": "Succeeded",
+          "runStartTimeUsecs": 1789472900000000,
+          "runEndTimeUsecs": 1789473480000000,
+          "isSlaViolated": false,
+          "successObjectsCount": 142,
+          "totalObjectsCount": 142,
+          "localSnapshotStats": {
+            "bytesRead": 107374182400,
+            "bytesWritten": 96636764160,
+            "logicalSizeBytes": 1099511627776
+          }
+        },
+        "objects": [
+          {
+            "object": {
+              "id": 4001,
+              "name": "PLACEHOLDER-VM-A",
+              "sourceId": 3001,
+              "environment": "kVMware",
+              "objectType": "kVirtualMachine",
+              "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+              "globalId": "1234567890123456:4001",
+              "vCenterSummary": {
+                "isCloudEnv": false,
+                "type": "kVCenter"
+              }
+            },
+            "localSnapshotInfo": {
+              "snapshotInfo": {
+                "status": "kSuccessful"
+              }
+            }
+          },
+          {
+            "object": {
+              "id": 4002,
+              "name": "PLACEHOLDER-VM-B",
+              "sourceId": 3001,
+              "environment": "kVMware",
+              "objectType": "kVirtualMachine",
+              "uuid": "421f9a3b-88c0-4f11-9d2e-6b7a10cc45ef",
+              "globalId": "1234567890123456:4002",
+              "vCenterSummary": {
+                "isCloudEnv": false,
+                "type": "kVCenter"
+              }
+            },
+            "localSnapshotInfo": {
+              "snapshotInfo": {
+                "status": "kSuccessful"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "r-70002",
+        "protectionGroupId": "g-9002",
+        "protectionGroupName": "SQL-Hourly-Logs",
+        "environment": "kSQL",
+        "isFullRun": false,
+        "localBackupInfo": {
+          "status": "Failed",
+          "runStartTimeUsecs": 1789472940000000,
+          "runEndTimeUsecs": 1789473120000000,
+          "isSlaViolated": true,
+          "successObjectsCount": 14,
+          "totalObjectsCount": 18,
+          "localSnapshotStats": {
+            "bytesRead": 0,
+            "bytesWritten": 0,
+            "logicalSizeBytes": 0
+          }
+        },
+        "objects": [
+          {
+            "object": {
+              "id": 4101,
+              "name": "PLACEHOLDER-SQL-INSTANCE",
+              "sourceId": 3002,
+              "environment": "kSQL",
+              "objectType": "kInstance",
+              "uuid": "5088628705619046646:1789472940012",
+              "globalId": "1234567890123456:4101"
+            },
+            "localSnapshotInfo": {
+              "snapshotInfo": {
+                "status": "kFailed"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "r-70003",
+        "protectionGroupId": "g-9003",
+        "protectionGroupName": "NAS-Weekly",
+        "environment": "kGenericNas",
+        "isFullRun": false,
+        "localBackupInfo": {
+          "status": "SucceededWithWarning",
+          "runStartTimeUsecs": 1789472700000000,
+          "runEndTimeUsecs": 1789473300000000,
+          "isSlaViolated": false,
+          "successObjectsCount": 5,
+          "totalObjectsCount": 6,
+          "localSnapshotStats": {
+            "bytesRead": 26843545600,
+            "bytesWritten": 21474836480,
+            "logicalSizeBytes": 274877906944
+          }
+        }
+      },
+      {
+        "id": "r-70004",
+        "protectionGroupId": "g-9002",
+        "protectionGroupName": "SQL-Hourly-Logs",
+        "environment": "kSQL",
+        "isFullRun": false,
+        "localBackupInfo": {
+          "status": "Running",
+          "runStartTimeUsecs": 1789473510000000,
+          "runEndTimeUsecs": null,
+          "isSlaViolated": false,
+          "successObjectsCount": 0,
+          "totalObjectsCount": 18,
+          "localSnapshotStats": {
+            "bytesRead": null,
+            "bytesWritten": null,
+            "logicalSizeBytes": null
+          }
+        }
+      },
+      {
+        "id": "r-70005",
+        "protectionGroupId": "g-9001",
+        "protectionGroupName": "Nightly-VMware-Tier1",
+        "environment": "kVMware",
+        "isFullRun": false,
+        "localBackupInfo": {
+          "status": "Missed",
+          "runStartTimeUsecs": 1789472800000000,
+          "runEndTimeUsecs": 1789472800000000,
+          "isSlaViolated": true,
+          "successObjectsCount": 0,
+          "totalObjectsCount": 142,
+          "localSnapshotStats": {
+            "bytesRead": 0,
+            "bytesWritten": 0,
+            "logicalSizeBytes": 0
+          }
+        }
+      }
+    ]
+  }
+}

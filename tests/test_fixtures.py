@@ -38,6 +38,8 @@ REQUIRED_FIXTURES = {
     "v2_stats_views__kNumBytesWritten",
     "v2_data-protect_protection-groups",
     "v2_data-protect_runs_summary",
+    # The fallback shape, for the two endpoints tried when runs/summary times out.
+    "v2_data-protect_protection-runs",
 }
 
 

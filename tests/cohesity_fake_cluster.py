@@ -21,6 +21,11 @@ field are modelled, so they can be seen failing here rather than at a customer:
   the numbers move plausibly over time and mints a fresh completed protection run per group
   every few minutes, so counters increment. Off by default: every other caller still sees the
   recorded bodies.
+* **An endpoint that 500s on its own documented parameters.** ``reject_params`` and
+  ``require_repeated`` make a path answer HTTP 500 for a parameter this cluster cannot cope
+  with, whatever its value. That is the customer shape exactly - the same 500 for all 20
+  entityId candidates and both view metrics - and it is the only way to see the client's
+  parameter-variant probe find its way around one rather than assume it would.
 * **Names nobody would type in a fixture.** Cluster, storage domain, view and protection group
   names are free text on a real cluster, and the SDK does not escape dimension values. The
   fixtures are all tidy ASCII, which is exactly why an unescaped quote shipped. ``hostile``
@@ -58,6 +63,15 @@ TOP_VIEWS_PATH = "/v2/stats/top-views"
 CLUSTER_STATUS_PATH = "/v2/clusters/status"
 TOP_VIEWS_MIN_VERSION = (7, 3)
 
+# The flat run list. One fixture serves it and every per-group
+# /v2/data-protect/protection-groups/{id}/runs, which is filtered from it by group id.
+PROTECTION_RUNS_LIST_PATH = "/v2/data-protect/protection-runs"
+
+# The legacy v1 endpoint the entityId probe asks for a candidate id. There is no fixture for it
+# and a real cluster may answer 403 or 404, so the default here is "this cluster will not serve
+# it" - which is the path the probe has to survive.
+V1_CLUSTER_PATH = "/irisservices/api/v1/public/cluster"
+
 # Field-name suffixes Cohesity uses for absolute instants, and the multiplier that turns one
 # second into that field's units.
 _TIME_SUFFIXES = (
@@ -86,6 +100,14 @@ def resolve(
     shift_seconds: float = 0.0,
     drift_now: float | None = None,
     hostile: bool = False,
+    stats_entity_id: str | None = None,
+    v1_cluster_id: str | None = None,
+    v1_cluster_status: int = 404,
+    storage_domain_stats_aliases: dict[str, str] | None = None,
+    fail_paths: dict[str, int] | None = None,
+    reject_params: dict[str, tuple[str, ...]] | None = None,
+    require_repeated: dict[str, tuple[str, ...]] | None = None,
+    raw_params: dict[str, list[str]] | None = None,
 ) -> Response:
     """Answer one request. Pure, so the whole surface is testable without a socket.
 
@@ -99,6 +121,35 @@ def resolve(
             against the same clock as the shifted ones.
         hostile: rewrite every entity name with :func:`hostile_names`. Applied last, so the
             runs that drift generates are renamed too.
+        stats_entity_id: the one entityId whose cluster-level time-series data actually exists.
+            Every other id gets the same series with empty dataPoints and HTTP 200, which is
+            what a real cluster does for a wrong entityId and is what the extension's entityId
+            probe has to see. None serves the fixture to anyone who asks, as before.
+        v1_cluster_id: the id v1 /public/cluster reports, or None to refuse the call with
+            ``v1_cluster_status``. Refusing is the default because that endpoint is unpublished
+            for 6.8-7.4 and an API key without the legacy privilege gets a 403.
+        v1_cluster_status: the status code used when ``v1_cluster_id`` is None - 404 for a
+            cluster that does not serve the path, 403 for a key that may not.
+        fail_paths: ``{full request path: status}`` for endpoints this cluster refuses. A key
+            whose owner lacks STORAGE_DOMAIN_VIEW gets a 403 on that path alone and 200
+            everywhere else, which is the shape that hid five metrics on a customer cluster -
+            and the shape the failure diagnostics exist to make visible.
+        reject_params: ``{full request path: parameter names}``. A request to that path
+            carrying any of those parameters is answered HTTP 500 - the cluster mishandling a
+            parameter rather than refusing the call. This is the customer-cluster shape that
+            cost five cluster metrics and one view metric: the same 500 for every value tried,
+            which rules out the values and leaves the request shape. It is what the client's
+            parameter-variant probe exists to find its way around.
+        require_repeated: ``{full request path: parameter names}`` that this cluster accepts
+            only in the repeated ``name=a&name=b`` form, answering 500 to the comma-joined one
+            the specification declares. The inverse of ``reject_params`` and the reason
+            ``raw_params`` is threaded through at all.
+        raw_params: the query with its multiplicity intact, as ``parse_qs`` returns it. Only
+            ``require_repeated`` reads it; everything else works off the flattened ``params``.
+        storage_domain_stats_aliases: ``{recorded name: name this cluster uses}``, applied to
+            every storage domain's ``stats`` object. The response shape is not identical across
+            6.8-7.4, and a customer cluster published neither of the two usage fields the
+            fixtures carry - this is how that cluster is reproduced.
     """
     presented = (headers.get("apikey") or "").strip()
     if not presented or (api_key is not None and presented != api_key):
@@ -109,6 +160,44 @@ def resolve(
                 "message": "Authentication failed. Provide a valid cluster API key in the apiKey header.",
             },
         )
+
+    # Checked before anything else the cluster might say about the path: a privilege the key
+    # does not hold is refused whatever the request would otherwise have answered.
+    refused = (fail_paths or {}).get(path)
+    if refused:
+        return Response(
+            refused,
+            {
+                "errorCode": "KNotAuthorized" if refused in (401, 403) else "KError",
+                "message": f"{path} is not permitted for this API key on this cluster",
+            },
+        )
+
+    # Checked after the privilege gate and before the path is resolved, because a 500 is what
+    # the cluster does *instead of* answering: it never gets as far as deciding what to send.
+    mishandled = _mishandled_parameters(path, params, raw_params, reject_params, require_repeated)
+    if mishandled:
+        return Response(
+            500,
+            {
+                "errorCode": "KInternalError",
+                "message": (
+                    f"Internal error handling {path}. Request parameters: "
+                    f"{', '.join(mishandled)}"
+                ),
+            },
+        )
+
+    if path == V1_CLUSTER_PATH:
+        if not v1_cluster_id:
+            return Response(
+                v1_cluster_status,
+                {
+                    "errorCode": "KNotAuthorized" if v1_cluster_status == 403 else "KNotFound",
+                    "message": f"{path} is not available on this cluster",
+                },
+            )
+        return Response(200, {"id": v1_cluster_id, "name": "fake-cohesity"})
 
     effective_version = software_version or _fixture_software_version(store)
     if path == TOP_VIEWS_PATH and not _has_top_views(effective_version):
@@ -123,6 +212,14 @@ def resolve(
             },
         )
 
+    # One fixture answers every group's runs, filtered to the group in the URL. A file per
+    # group id would have to be regenerated whenever the protection-groups fixture changes,
+    # and the two would drift apart silently the first time they did.
+    group_id = _runs_group_id(path)
+    if group_id is not None:
+        fixture = store.get(PROTECTION_RUNS_LIST_PATH, params)
+        return Response(200, _runs_for_group(fixture.body, group_id))
+
     try:
         fixture = store.get(path, params)
     except Exception as exception:  # noqa: BLE001 - any fixture problem is a 404 to the caller
@@ -135,6 +232,10 @@ def resolve(
         )
 
     body = fixture.body
+    if stats_entity_id is not None and path == TIME_SERIES_STATS_PATH:
+        body = only_for_entity(body, params.get("entityId", ""), stats_entity_id)
+    if storage_domain_stats_aliases and path == STORAGE_DOMAINS_PATH:
+        body = rename_stats_fields(body, storage_domain_stats_aliases)
     if software_version and path == CLUSTER_STATUS_PATH and isinstance(body, dict):
         body = dict(body)
         body["softwareVersion"] = software_version
@@ -145,6 +246,46 @@ def resolve(
     if hostile:
         body = hostile_names(path, body)
     return Response(200, body)
+
+
+def _runs_group_id(path: str) -> str | None:
+    """The group id out of ``/v2/data-protect/protection-groups/{id}/runs``, or None."""
+    if not path.startswith(PROTECTION_GROUPS_PATH + "/") or not path.endswith("/runs"):
+        return None
+    middle = path[len(PROTECTION_GROUPS_PATH) + 1 : -len("/runs")]
+    return urllib.parse.unquote(middle) if middle and "/" not in middle else None
+
+
+def _runs_for_group(body: Any, group_id: str) -> Any:
+    """The run-list body with only the runs belonging to one group.
+
+    A real per-group endpoint cannot return another group's runs, and an extension that fanned
+    out and got everything back each time would look like it was working while counting every
+    run once per group.
+    """
+    if not isinstance(body, dict):
+        return body
+    runs = [
+        run
+        for run in body.get("runs") or []
+        if isinstance(run, dict) and str(run.get("protectionGroupId", "")) == group_id
+    ]
+    return {**body, "runs": runs, "totalRuns": len(runs)}
+
+
+def _mishandled_parameters(
+    path: str,
+    params: dict[str, str],
+    raw_params: dict[str, list[str]] | None,
+    reject_params: dict[str, tuple[str, ...]] | None,
+    require_repeated: dict[str, tuple[str, ...]] | None,
+) -> list[str]:
+    """Parameter names of this request that this cluster cannot cope with, in name order."""
+    bad = {name for name in (reject_params or {}).get(path, ()) if name in params}
+    for name in (require_repeated or {}).get(path, ()):
+        if name in params and len((raw_params or {}).get(name, [])) < 2:
+            bad.add(name)
+    return sorted(bad)
 
 
 def shift_times(payload: Any, seconds: float) -> Any:
@@ -190,6 +331,42 @@ def _fixture_software_version(store: FixtureStore) -> str:
     except Exception:  # noqa: BLE001 - no status fixture means no version claim to make
         return ""
     return str(body.get("softwareVersion", "")) if isinstance(body, dict) else ""
+
+
+def only_for_entity(body: Any, asked_for: str, answers_to: str) -> Any:
+    """The series with their dataPoints stripped unless the request named the right entityId.
+
+    Modelled on the failure that cost this extension five metrics: a wrong entityId is answered
+    with HTTP 200 and the requested series present but empty. There is no error to catch and no
+    404 to fall back from, so the only way to tell is to look at whether any point came back.
+    """
+    if str(asked_for) == str(answers_to) or not isinstance(body, dict):
+        return body
+    body = copy.deepcopy(body)
+    for series in body.get("timeSeriesStats") or []:
+        if isinstance(series, dict):
+            series["dataPoints"] = []
+    return body
+
+
+def rename_stats_fields(body: Any, aliases: dict[str, str]) -> Any:
+    """Rename keys inside every storage domain's ``stats`` object.
+
+    A rename, not an addition: a field the cluster spells differently is a field that is *not*
+    there under the recorded name, and the extension must produce no sample for it rather than
+    a zero.
+    """
+    if not isinstance(body, dict):
+        return body
+    body = copy.deepcopy(body)
+    for storage_domain in body.get("storageDomains") or []:
+        stats = storage_domain.get("stats") if isinstance(storage_domain, dict) else None
+        if not isinstance(stats, dict):
+            continue
+        for recorded, replacement in aliases.items():
+            if recorded in stats:
+                stats[replacement] = stats.pop(recorded)
+    return body
 
 
 # -- drift ----------------------------------------------------------------------------------
@@ -426,6 +603,13 @@ class FakeCohesityCluster:
     certfile: str = ""
     drift: bool = False
     hostile: bool = False
+    stats_entity_id: str | None = None
+    v1_cluster_id: str | None = None
+    v1_cluster_status: int = 404
+    storage_domain_stats_aliases: dict[str, str] | None = None
+    fail_paths: dict[str, int] | None = None
+    reject_params: dict[str, tuple[str, ...]] | None = None
+    require_repeated: dict[str, tuple[str, ...]] | None = None
     requests: list[str] = field(default_factory=list)
 
     def __post_init__(self):
@@ -452,9 +636,8 @@ class FakeCohesityCluster:
 
             def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's naming
                 parsed = urllib.parse.urlparse(self.path)
-                params = {
-                    name: values[0] for name, values in urllib.parse.parse_qs(parsed.query).items()
-                }
+                raw_params = urllib.parse.parse_qs(parsed.query)
+                params = {name: values[0] for name, values in raw_params.items()}
                 headers = {name.lower(): value for name, value in self.headers.items()}
                 cluster.requests.append(self.path)
                 answer = resolve(
@@ -467,6 +650,14 @@ class FakeCohesityCluster:
                     shift_seconds=cluster.shift_seconds,
                     drift_now=time.time() if cluster.drift else None,
                     hostile=cluster.hostile,
+                    stats_entity_id=cluster.stats_entity_id,
+                    v1_cluster_id=cluster.v1_cluster_id,
+                    v1_cluster_status=cluster.v1_cluster_status,
+                    storage_domain_stats_aliases=cluster.storage_domain_stats_aliases,
+                    fail_paths=cluster.fail_paths,
+                    reject_params=cluster.reject_params,
+                    require_repeated=cluster.require_repeated,
+                    raw_params=raw_params,
                 )
                 encoded = json.dumps(answer.body).encode("utf-8")
                 self.send_response(answer.status)

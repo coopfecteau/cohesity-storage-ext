@@ -150,10 +150,10 @@ Steps:
 
 | Check | DQL | Proves |
 |---|---|---|
-| metrics present | `metrics` filtered on `cohesity`, window starting at this run | all **21** keys from `extension.yaml` reached Grail (a Grail-side prefix such as `ext:` is tolerated and reported) |
+| metrics present | `metrics` filtered on `cohesity`, window starting at this run | all **22** keys from `extension.yaml` reached Grail (a Grail-side prefix such as `ext:` is tolerated and reported) |
 | collection_success | `timeseries max(cohesity.cluster.collection_success)` over 5 min | the extension reached the cluster over verified TLS with the key, this interval |
 | smartscape nodes | `smartscapeNodes "EXT_COHESITY_*"` by type | OpenPipeline node extraction produced ≥1 `EXT_COHESITY_CLUSTER`, `_STORAGE_DOMAIN`, `_PROTECTION_GROUP` |
-| smartscape edges | `smartscapeEdges "contains", "writes_to"` | cluster `contains` domain and group, group `writes_to` domain |
+| smartscape edges | `smartscapeEdges "contains", "writes_to"` | cluster `contains` domain and `contains` group, group `writes_to` domain. Rows are counted client-side: a `startsWith` filter on `source_id` in `smartscapeEdges` silently matches nothing and reads as a missing edge |
 
 Run metrics depend on completed protection runs; with static fixtures they would only appear on
 the first poll after a restart. `--drift` mints a new completed run per group every 5 minutes

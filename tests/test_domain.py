@@ -7,6 +7,8 @@ into agreeing with each other.
 
 from __future__ import annotations
 
+import pytest
+
 from cohesity_storage import domain
 
 
@@ -165,6 +167,275 @@ class TestClusterStatus:
         assert (status.cluster_id, status.name) == ("", "")
 
 
+class TestEntityIdCandidateSources:
+    """The ids a cluster-identity response can offer the entityId probe."""
+
+    def test_the_v1_body_offers_its_id(self):
+        assert domain.cluster_id_candidates({"id": 42, "name": "prod"}) == ["42"]
+
+    def test_both_spellings_are_read_in_the_order_asked_for(self):
+        payload = {"id": 1, "clusterId": 2}
+
+        assert domain.cluster_id_candidates(payload) == ["1", "2"]
+        assert domain.cluster_id_candidates(payload, ("clusterId", "id")) == ["2", "1"]
+
+    def test_incarnation_ids_are_a_separate_tier(self):
+        payload = {"clusterId": 2, "clusterIncarnationId": 99}
+
+        assert domain.cluster_id_candidates(payload, domain.CLUSTER_ALTERNATE_ID_FIELDS) == ["99"]
+
+    def test_a_source_with_nothing_to_offer_costs_the_probe_nothing(self):
+        # A 403 hands back None, and a cluster may simply not carry the field.
+        assert domain.cluster_id_candidates(None) == []
+        assert domain.cluster_id_candidates({"name": "prod"}) == []
+        assert domain.cluster_id_candidates({"clusterId": None}) == []
+
+    def test_booleans_are_not_ids(self):
+        assert domain.cluster_id_candidates({"id": True}) == []
+
+    def test_duplicates_collapse_so_no_request_is_wasted(self):
+        # v1 id and v2 clusterId are the same int64 on most clusters, and every duplicate would
+        # otherwise cost one wasted request per schema on the first poll.
+        assert domain.ordered_unique(["7", "7", "", "8", None, " 7 "]) == ["7", "8"]
+
+
+class TestStorageDomainFieldAliases:
+    """Two usage fields the published model names, and a customer cluster does not."""
+
+    def domain_with(self, stats: dict) -> domain.StorageDomain:
+        return domain.parse_storage_domains({"storageDomains": [{"id": "5", "stats": stats}]})[0]
+
+    @pytest.mark.parametrize("name", domain.STORAGE_DOMAIN_LOGICAL_FIELDS)
+    def test_every_logical_alias_is_picked_up(self, name):
+        assert self.domain_with({name: 123}).total_logical_usage_bytes == 123
+
+    @pytest.mark.parametrize("name", domain.STORAGE_DOMAIN_PHYSICAL_FIELDS)
+    def test_every_physical_alias_is_picked_up(self, name):
+        assert self.domain_with({name: 456}).local_total_physical_usage_bytes == 456
+
+    def test_the_published_name_wins_when_several_are_present(self):
+        stats = {"totalLogicalUsageBytes": 1, "logicalUsageBytes": 2, "dataInBytes": 3}
+
+        assert self.domain_with(stats).total_logical_usage_bytes == 1
+
+    def test_a_null_alias_falls_through_to_the_next_rather_than_ending_the_search(self):
+        # A field published with no value has told us nothing, and a later alias may carry it.
+        stats = {"totalLogicalUsageBytes": None, "logicalUsageBytes": 9}
+
+        assert self.domain_with(stats).total_logical_usage_bytes == 9
+
+    def test_no_candidate_present_reads_as_none_rather_than_zero(self):
+        # The whole metric layer rests on this: a reported zero usage reads as an outage.
+        parsed = self.domain_with({"localTierResiliencyImpactBytes": 7})
+
+        assert parsed.total_logical_usage_bytes is None
+        assert parsed.local_total_physical_usage_bytes is None
+        assert parsed.local_tier_resiliency_impact_bytes == 7
+
+    def test_the_customer_shape_is_read_once_the_aliases_are_in(self):
+        # Resiliency arrived from this same object while the other two did not, which is what
+        # ruled out a missing stats object and left only the field names.
+        parsed = self.domain_with(
+            {
+                "logicalUsageBytes": 100,
+                "totalPhysicalUsageBytes": 40,
+                "localTierResiliencyImpactBytes": 8,
+            }
+        )
+
+        assert (parsed.total_logical_usage_bytes, parsed.local_total_physical_usage_bytes) == (100, 40)
+
+
+class TestStorageDomainStatsFieldNames:
+    """The diagnostic that makes the aliasing above answerable from Grail."""
+
+    def test_the_first_domains_keys_come_back_sorted(self):
+        payload = {
+            "storageDomains": [
+                {"id": "1", "stats": {"zBytes": 1, "aBytes": 2}},
+                {"id": "2", "stats": {"otherBytes": 3}},
+            ]
+        }
+
+        assert domain.storage_domain_stats_fields(payload) == ("aBytes", "zBytes")
+
+    def test_a_domain_without_stats_is_stepped_over(self):
+        payload = {"storageDomains": [{"id": "1"}, {"id": "2", "stats": {"bBytes": 1}}]}
+
+        assert domain.storage_domain_stats_fields(payload) == ("bBytes",)
+
+    def test_nothing_to_report_is_empty_rather_than_an_error(self):
+        assert domain.storage_domain_stats_fields({"storageDomains": []}) == ()
+        assert domain.storage_domain_stats_fields(None) == ()
+
+
+class TestUuidShape:
+    """The verdict that decides ticket 16, and the one way of getting it wrong that matters."""
+
+    def test_a_vmware_bios_uuid_reads_as_a_uuid(self):
+        # The exact normalised form of what a Dynatrace HOST publishes as
+        # host.additional_system_info["system.serial"]. If Cohesity says this, the join is on.
+        assert (
+            domain.uuid_shape("00112233-4455-6677-8899-aabbccddeeff")
+            == domain.UUID_VERDICT_CANONICAL
+        )
+
+    def test_case_and_surrounding_space_do_not_change_the_answer(self):
+        assert (
+            domain.uuid_shape("  00112233-4455-6677-8899-AABBCCDDEEFF  ")
+            == domain.UUID_VERDICT_CANONICAL
+        )
+
+    def test_an_undashed_uuid_is_told_apart_from_a_dashed_one(self):
+        assert domain.uuid_shape("00112233445566778899aabbccddeeff") == domain.UUID_VERDICT_HEX32
+
+    def test_a_uuid_that_needs_its_separators_stripped_says_so(self):
+        # Whoever builds the lookup table has to write that normalisation, so "it works after
+        # you strip things" is a different answer from "it works".
+        assert (
+            domain.uuid_shape("00112233 4455 6677 8899 aabbccddeeff")
+            == domain.UUID_VERDICT_NORMALISES
+        )
+
+    def test_a_thirty_two_digit_cohesity_id_is_not_mistaken_for_a_uuid(self):
+        # The trap this whole verdict exists to avoid: 32 decimal digits are also 32 valid hex
+        # digits, so a structural hex test alone answers the ticket exactly backwards.
+        assert domain.uuid_shape("5" * 32) == domain.UUID_VERDICT_NUMERIC
+
+    def test_a_colon_joined_int64_pair_is_a_cohesity_id(self):
+        assert (
+            domain.uuid_shape("5088628705619046646:1789472940012")
+            == domain.UUID_VERDICT_NUMERIC
+        )
+
+    def test_an_ordinary_string_is_not_a_uuid(self):
+        assert domain.uuid_shape("sql-instance-primary") == domain.UUID_VERDICT_OTHER
+
+    def test_absent_and_empty_are_missing_rather_than_not_a_uuid(self):
+        # Different facts with different follow-ups: "this cluster does not publish a uuid"
+        # is not the same finding as "it publishes one that is useless".
+        assert domain.uuid_shape(None) == domain.UUID_VERDICT_MISSING
+        assert domain.uuid_shape("   ") == domain.UUID_VERDICT_MISSING
+
+
+class TestProtectedObjectShape:
+    """What comes back from includeObjectDetails=true, reduced to something reportable."""
+
+    def vmware_payload(self, count: int = 2) -> dict:
+        return {
+            "runs": [
+                {
+                    "id": "r-1",
+                    "environment": "kVMware",
+                    "objects": [
+                        {
+                            "object": {
+                                "id": 4000 + index,
+                                "name": f"PLACEHOLDER-VM-{index}",
+                                "environment": "kVMware",
+                                "uuid": f"00112233-4455-6677-7303-3c757acff8d{index}",
+                                "globalId": f"9:{4000 + index}",
+                                "vCenterSummary": {"isCloudEnv": False, "type": "kVCenter"},
+                            }
+                        }
+                        for index in range(count)
+                    ],
+                }
+            ]
+        }
+
+    def test_the_object_keys_come_back_sorted_and_by_name_only(self):
+        shape = domain.parse_protected_object_shape(self.vmware_payload())
+
+        assert shape.object_fields == (
+            "environment",
+            "globalId",
+            "id",
+            "name",
+            "uuid",
+            "vCenterSummary",
+        )
+
+    def test_the_vmware_sub_object_is_found_and_its_keys_reported(self):
+        shape = domain.parse_protected_object_shape(self.vmware_payload())
+
+        assert shape.vmware_key == "vCenterSummary"
+        assert shape.vmware_fields == ("isCloudEnv", "type")
+
+    def test_a_source_with_no_vmware_block_says_so_rather_than_guessing(self):
+        payload = {
+            "runs": [
+                {"id": "r-1", "objects": [{"object": {"id": 1, "uuid": "9:1"}}]},
+            ]
+        }
+
+        shape = domain.parse_protected_object_shape(payload)
+
+        assert shape.vmware_key == ""
+        assert shape.vmware_fields == ()
+
+    def test_the_field_names_are_a_union_not_the_first_objects_keys(self):
+        # Cohesity omits null fields, so reading only the first object would report "this
+        # cluster has no vCenterSummary" off an object that merely lacked one.
+        payload = {
+            "runs": [
+                {
+                    "id": "r-1",
+                    "objects": [
+                        {"object": {"id": 1}},
+                        {"object": {"id": 2, "vCenterSummary": {"type": "kVCenter"}}},
+                    ],
+                }
+            ]
+        }
+
+        shape = domain.parse_protected_object_shape(payload)
+
+        assert shape.object_fields == ("id", "vCenterSummary")
+        assert shape.vmware_key == "vCenterSummary"
+
+    def test_at_most_three_uuids_are_carried_however_many_objects_there_are(self):
+        shape = domain.parse_protected_object_shape(self.vmware_payload(count=12))
+
+        assert shape.objects_seen == 12
+        assert len(shape.uuid_samples) == domain.MAX_UUID_SAMPLES
+
+    def test_each_sample_carries_the_value_and_its_verdict(self):
+        shape = domain.parse_protected_object_shape(self.vmware_payload(count=1))
+
+        assert shape.uuid_samples == (
+            ("00112233-4455-6677-7303-3c757acff8d0", domain.UUID_VERDICT_CANONICAL),
+        )
+
+    def test_an_object_with_no_uuid_is_reported_as_missing_rather_than_skipped(self):
+        # "The object is there and carries no uuid" is the answer that ends the ticket, so it
+        # must not look like "no objects came back".
+        payload = {"runs": [{"id": "r-1", "objects": [{"object": {"id": 1, "name": "x"}}]}]}
+
+        shape = domain.parse_protected_object_shape(payload)
+
+        assert shape.objects_seen == 1
+        assert shape.uuid_samples == (("", domain.UUID_VERDICT_MISSING),)
+
+    def test_the_groups_environment_wins_over_the_runs(self):
+        shape = domain.parse_protected_object_shape(self.vmware_payload(), environment="kVMware")
+
+        assert shape.environment == "kVMware"
+
+    def test_the_runs_environment_is_used_when_the_group_did_not_say(self):
+        shape = domain.parse_protected_object_shape(self.vmware_payload(), environment="")
+
+        assert shape.environment == "kVMware"
+
+    def test_a_response_with_no_objects_parses_to_an_empty_shape(self):
+        for payload in ({"runs": [{"id": "r-1"}]}, {"runs": []}, None, {"runs": [{"objects": 7}]}):
+            shape = domain.parse_protected_object_shape(payload)
+
+            assert shape.objects_seen == 0
+            assert shape.object_fields == ()
+            assert shape.uuid_samples == ()
+
+
 class TestClusterStorage:
     def test_the_seven_scalars_are_read(self):
         storage = domain.parse_cluster_storage(
@@ -298,6 +569,226 @@ class TestProtectionRuns:
         )
 
         assert run.duration_msecs is None
+
+
+class TestRunListShape:
+    """The shape the two fallback endpoints answer with, when runs/summary will not.
+
+    Different from runs/summary in three ways that all matter: the facts sit under
+    ``localBackupInfo``, the bytes sit under ``localSnapshotStats`` inside that, and the times
+    are spelled ``runStartTimeUsecs``. Only one of the two endpoints is in the 7.3.2 reference
+    this extension was written from, so both spellings are read rather than one guessed at.
+    """
+
+    def body(self, **overrides):
+        run = {
+            "id": "r-1",
+            "protectionGroupId": "g-1",
+            "protectionGroupName": "Nightly",
+            "environment": "kVMware",
+            "localBackupInfo": {
+                "status": "Failed",
+                "runStartTimeUsecs": 1_000_000_000,
+                "runEndTimeUsecs": 1_060_000_000,
+                "isSlaViolated": True,
+                "successObjectsCount": 14,
+                "totalObjectsCount": 18,
+                "localSnapshotStats": {"bytesWritten": 1024, "logicalSizeBytes": 4096},
+            },
+        }
+        run.update(overrides)
+        return {"runs": [run]}
+
+    def test_the_nested_shape_reads_into_the_same_record(self):
+        run = domain.parse_run_list(self.body())[0]
+
+        assert run.id == "r-1"
+        assert run.status == "Failed"
+        assert run.duration_msecs == 60_000
+        assert run.bytes_written == 1024
+        assert run.logical_size_bytes == 4096
+        assert run.success_objects_count == 14
+        assert run.is_sla_violated is True
+        assert run.environment == "kVMware"
+
+    def test_the_summary_spellings_are_accepted_too(self):
+        # The flat list endpoint is not in the 7.3.2 reference at all, so which of the two
+        # spellings it uses is unknown. Reading both is cheaper than being wrong.
+        runs = domain.parse_run_list(
+            {
+                "runs": [
+                    {
+                        "id": "r-2",
+                        "status": "Succeeded",
+                        "startTimeUsecs": 1_000_000,
+                        "endTimeUsecs": 3_000_000,
+                        "bytesWritten": 7,
+                    }
+                ]
+            }
+        )
+
+        assert runs[0].status == "Succeeded"
+        assert runs[0].duration_msecs == 2_000
+        assert runs[0].bytes_written == 7
+
+    def test_the_runs_summary_wrapper_is_read_by_the_same_parser(self):
+        runs = domain.parse_run_list(
+            {"protectionRunsSummary": [{"id": "r-3", "status": "Succeeded"}]}
+        )
+
+        assert [run.id for run in runs] == ["r-3"]
+
+    def test_the_group_in_the_url_fills_in_what_the_body_omits(self):
+        # The per-group endpoint does not repeat the job it was asked about; it is in the path.
+        runs = domain.parse_run_list(
+            {"runs": [{"id": "r-4", "status": "Succeeded"}]},
+            group_id="g-7",
+            group_name="Weekly-NAS",
+        )
+
+        assert runs[0].protection_group_id == "g-7"
+        assert runs[0].protection_group_name == "Weekly-NAS"
+
+    def test_what_the_cluster_states_beats_what_the_caller_assumed(self):
+        runs = domain.parse_run_list(self.body(), group_id="wrong", group_name="wrong")
+
+        assert runs[0].protection_group_id == "g-1"
+
+    def test_zero_bytes_written_survives_the_lookup(self):
+        # A failed run writes zero bytes, and zero is falsy - an `or` chain would drop it and
+        # report no sample where "it wrote nothing" is the answer.
+        body = self.body()
+        body["runs"][0]["localBackupInfo"]["localSnapshotStats"]["bytesWritten"] = 0
+
+        assert domain.parse_run_list(body)[0].bytes_written == 0
+
+    def test_a_run_with_no_id_is_dropped(self):
+        # Same rule as the summary parser: an un-deduplicable run is counted once per window.
+        runs = domain.parse_run_list({"runs": [{"status": "Succeeded"}, {"id": "r-5"}]})
+
+        assert [run.id for run in runs] == ["r-5"]
+
+    def test_a_non_terminal_run_is_still_recognised_through_this_shape(self):
+        body = self.body()
+        body["runs"][0]["localBackupInfo"]["status"] = "Running"
+
+        assert domain.parse_run_list(body)[0].is_terminal is False
+
+
+class TestRunStatusIsNeverAbsent:
+    """Measured on the customer tenant: 28 of 92 counted runs carried NO status dimension.
+
+    `timeseries sum(cohesity.protectiongroup.run.outcome), by:{status}` answered
+    `Succeeded 64` / `None 28`. The runs were counted and then could not be classified, and
+    the totals looked perfectly healthy - the hole is invisible unless somebody groups by
+    status. A run whose only target is an archive or a replica has no `localBackupInfo`, so
+    the two-place lookup found nothing and `wire_dimensions` dropped the empty value.
+    """
+
+    def run(self, **overrides):
+        run = {"id": "r-1", "protectionGroupId": "g-1"}
+        run.update(overrides)
+        return {"runs": [run]}
+
+    def test_status_in_the_local_backup_block(self):
+        runs = domain.parse_run_list(self.run(localBackupInfo={"status": "Succeeded"}))
+
+        assert runs[0].status == "Succeeded"
+
+    def test_status_at_the_run_root(self):
+        runs = domain.parse_run_list(self.run(status="Failed"))
+
+        assert runs[0].status == "Failed"
+
+    def test_the_local_backup_block_wins_over_the_run_root(self):
+        # The local backup is the run as an operator means it; a root status on the same run
+        # is the roll-up across every target.
+        runs = domain.parse_run_list(
+            self.run(status="Succeeded", localBackupInfo={"status": "Failed"})
+        )
+
+        assert runs[0].status == "Failed"
+
+    def test_status_only_in_an_archival_target_result(self):
+        # The actual shape of the 28. No local copy at all, so no localBackupInfo block.
+        runs = domain.parse_run_list(
+            self.run(archivalInfo={"archivalTargetResults": [{"status": "Succeeded"}]})
+        )
+
+        assert runs[0].status == "Succeeded"
+
+    def test_status_only_in_a_replication_target_result(self):
+        runs = domain.parse_run_list(
+            self.run(replicationInfo={"replicationTargetResults": [{"status": "Failed"}]})
+        )
+
+        assert runs[0].status == "Failed"
+
+    def test_status_only_in_a_cloud_spin_target_result(self):
+        runs = domain.parse_run_list(
+            self.run(cloudSpinInfo={"cloudSpinTargetResults": [{"status": "Running"}]})
+        )
+
+        assert runs[0].status == "Running"
+
+    def test_status_only_in_the_original_backup_block(self):
+        runs = domain.parse_run_list(self.run(originalBackupInfo={"status": "Succeeded"}))
+
+        assert runs[0].status == "Succeeded"
+
+    def test_status_nowhere_at_all_is_exactly_unknown(self):
+        # Never "", which vanishes. "unknown" is countable, chartable and alertable.
+        runs = domain.parse_run_list(self.run(someFutureBlock={"nothing": 1}))
+
+        assert runs[0].status == domain.RUN_STATUS_UNKNOWN
+        assert runs[0].status == "unknown"
+
+    def test_the_summary_parser_has_the_same_guarantee(self):
+        runs = domain.parse_protection_runs({"protectionRunsSummary": [{"id": "r-1"}]})
+
+        assert runs[0].status == domain.RUN_STATUS_UNKNOWN
+
+    def test_an_empty_string_status_does_not_survive_as_one(self):
+        # Cohesity omits null fields, but an explicit "" is a shape a cluster can send and it
+        # would reach the ingest as a dropped dimension exactly like a missing one.
+        runs = domain.parse_run_list(self.run(status="", localBackupInfo={"status": ""}))
+
+        assert runs[0].status == domain.RUN_STATUS_UNKNOWN
+
+    def test_an_empty_target_result_list_does_not_resolve_a_status(self):
+        runs = domain.parse_run_list(self.run(archivalInfo={"archivalTargetResults": []}))
+
+        assert runs[0].status == domain.RUN_STATUS_UNKNOWN
+
+    def test_the_first_target_result_that_states_a_status_wins(self):
+        runs = domain.parse_run_list(
+            self.run(
+                archivalInfo={"archivalTargetResults": [{"noStatusHere": 1}, {"status": "Failed"}]}
+            )
+        )
+
+        assert runs[0].status == "Failed"
+
+    def test_the_field_names_of_an_unclassifiable_run_are_reportable(self):
+        """Names only - the storage-domain trick, applied to the same kind of blind spot.
+
+        "unknown" says the status is missing; only the field list says where it really is.
+        """
+        payload = self.run(
+            protectionGroupName="Nightly",
+            archivalInfo={"archivalTargetResults": [], "someOtherKey": 1},
+        )
+        names = domain.run_field_names(payload, "r-1")
+
+        assert "archivalInfo" in names
+        assert "archivalInfo.someOtherKey" in names
+        assert "protectionGroupName" in names
+        # The NAME of the field, never what a Cohesity admin typed into it.
+        assert "Nightly" not in names
+
+    def test_the_field_names_of_a_run_that_is_not_there_are_empty(self):
+        assert domain.run_field_names(self.run(), "r-other") == ()
 
 
 class TestProtectionGroups:

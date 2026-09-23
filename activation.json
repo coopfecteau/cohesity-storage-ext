@@ -16,16 +16,20 @@
       "collectStorageDomains": true,
       "collectViews": true,
       "collectProtection": true,
+      "collectHostLink": false,
       "intervalMinutes": 5,
-      "requestTimeoutSeconds": 30
+      "requestTimeoutSeconds": 30,
+      "maxRunFanoutGroups": 20,
+      "maxHostLinkObjects": 200
     }
   },
-  "version": "0.1.3",
+  "version": "0.1.9",
   "activationContext": "REMOTE",
   "featureSets": [
     "storage_domains",
     "views",
-    "protection"
+    "protection",
+    "host_link"
   ],
   "pythonRemote": {
     "endpoints": [
@@ -42,8 +46,11 @@
         "collectStorageDomains": true,
         "collectViews": true,
         "collectProtection": true,
+        "collectHostLink": true,
         "intervalMinutes": 1,
-        "requestTimeoutSeconds": 30
+        "requestTimeoutSeconds": 30,
+        "maxRunFanoutGroups": 20,
+        "maxHostLinkObjects": 200
       }
     ]
   }

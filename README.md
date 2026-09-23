@@ -19,9 +19,13 @@ ActiveGate ──https + apiKey──▶ Cohesity cluster ──REST──▶ me
 
 ## Status: v0.1.0 — full metric set and Smartscape topology
 
-21 metric keys across three entity prefixes, and three Smartscape node types with three edges,
-all derived from the metric stream by OpenPipeline. Nothing has yet run against a real Cohesity
-cluster; every number below has only ever come from a synthetic fixture.
+22 metric keys across three entity prefixes, and three Smartscape node types with three edges,
+all derived from the metric stream by OpenPipeline. A fourth edge - protection group to the
+Dynatrace `HOST` it backs up - is opt-in and needs two assets installed on the tenant; see
+[Linking protection groups to hosts](#linking-protection-groups-to-hosts).
+
+Nothing has yet run against a real Cohesity cluster; every number below has only ever come
+from a synthetic fixture.
 
 | Piece | Lives in |
 |---|---|
@@ -146,6 +150,10 @@ because the rules say they carry no underscore. There are tests for all three.
 | `cohesity.storagedomain` | `EXT_COHESITY_STORAGE_DOMAIN` |
 | `cohesity.protectiongroup` | `EXT_COHESITY_PROTECTION_GROUP` |
 
+The bridge metric sits under the protection-group prefix for the same reason view throughput
+sits under the cluster one: it binds to an entity that already exists rather than inviting a
+per-VM entity type. `cohesity.object.*` would match no rule and float unattached.
+
 Everything that discriminates goes in dimensions. Identity dimensions stay `cohesity.*`-prefixed
 so they cannot collide with a built-in field: `cohesity.cluster.id`, `cohesity.cluster.name`,
 `cohesity.storagedomain.id`, `cohesity.storagedomain.name`, `cohesity.protectiongroup.id`,
@@ -170,6 +178,23 @@ comes from `idComponents`, which for the cluster is the cluster id alone.
 a delta counter of newly completed runs dimensioned by terminal `status`, deduplicated on
 `run.id`; `cohesity.protectiongroup.last_success.age` is the gauge that sees the run which never
 happened. A counter for what happened, an age gauge for what did not.
+
+**`status` is never absent — it says `unknown` instead.** Measured on the customer tenant:
+`timeseries sum(cohesity.protectiongroup.run.outcome), by:{status}` answered `Succeeded 64` and
+`None 28`. A quarter of the counted runs carried no `status` dimension at all, so they could be
+counted but not classified — and the totals looked perfectly healthy, because the hole is
+invisible unless somebody groups by status. A run whose only target is an archive or a replica
+has no `localBackupInfo` block, the two-place lookup found nothing, and `wire_dimensions`
+dropped the empty value. `domain.run_status` now also reads `originalBackupInfo` and the
+`archivalInfo` / `replicationInfo` / `cloudSpinInfo` target results, and falls back to the
+literal string `unknown` rather than to nothing — a dimension that is absent cannot be counted,
+charted or alerted on, and one that says `unknown` is all three. When it fires, the extension
+also writes one WARN diagnostic listing the key names that run *did* carry, so the real location
+can be read off Grail rather than guessed at.
+
+The bridge metric `cohesity.protectiongroup.protects` is the one exception to all of this: its
+value is a constant 1 and means nothing, its dimensions are the whole payload, and it is off by
+default. See [Linking protection groups to hosts](#linking-protection-groups-to-hosts).
 
 Cohesity object ids are cluster-scoped int64s and **will** collide across clusters, so every
 id below cluster level is namespaced `{clusterId}_{objectId}` — from day one, even though v1
@@ -206,6 +231,17 @@ Four things here are load-bearing and each cost somebody a round trip to a tenan
 - **The `EXT_` prefix is mandatory.** Bare `COHESITY_CLUSTER` is rejected server-side with
   `Must start with one of ['CUSTOM_, EXT_']` — a rule the published settings schema never
   mentions. Edge types are lowercase and at most 32 characters.
+- **Verify topology by counting unfiltered rows, not with a filtered DQL query.**
+  `smartscapeEdges "contains" | filter startsWith(source_id, "EXT_COHESITY")` returns 0. So does
+  the same query for `writes_to`, which demonstrably has 42 edges — a `startsWith` filter on
+  `source_id` in `smartscapeEdges` silently matches nothing, and 0 rows reads exactly like a
+  missing edge. Count the unfiltered rows client-side before concluding anything is absent.
+  That mismeasurement cost a release: 0.1.5 renamed both containment edges to
+  `has_storage_domain` and `has_protection_group` on the strength of it, when `contains` was
+  carrying 51 Cohesity edges (42 cluster→protection group, 9 cluster→storage domain) the whole
+  time. 0.1.6 puts both back to `contains`; the 0.1.5 `has_*` edges age out once nothing emits
+  them. Built-in edge types are fine on a custom extraction rule — unlike node types, where the
+  `EXT_`/`CUSTOM_` prefix really is mandatory.
 - **Identity is the id, never the name.** Storage domains and protection groups can both be
   renamed; a name in the identity orphans the entity and silently mints a second one. Ids are
   namespaced `{clusterId}_{objectId}`, because Cohesity ids are cluster-scoped int64s.
@@ -217,6 +253,79 @@ Four things here are load-bearing and each cost somebody a round trip to a tenan
   carry the domain id but not its name, so a second extracting rule there would rename every
   domain to the default. Those metrics instead feed an `extractNode: false` rule, which computes
   the domain's node id for the edge without creating a node.
+
+## Linking protection groups to hosts
+
+**Off by default.** Turn on *Link protection groups to Dynatrace hosts (VMware only)* per
+cluster, then install the two tenant assets in [`dynatrace/`](dynatrace/README.md). Until both
+are done nothing changes: the metric is not collected, and the pipeline that would use it ships
+with empty lookup tables.
+
+What it draws:
+
+```
+EXT_COHESITY_PROTECTION_GROUP ──protects──▶ HOST
+```
+
+The join key is the **VMware BIOS UUID**. Dynatrace publishes it on a HOST as
+`host.additional_system_info["system.serial"]`, shaped
+`VMware-00 11 22 33 44 55 66 77-88 99 aa bb cc dd ee ff`; Cohesity publishes it on a protected
+object as `uuid`. Both normalise to `00112233-4455-6677-8899-aabbccddeeff`. It is a
+UUID-to-UUID join, not a hostname match — hostname matching across short name, FQDN and case
+produces confident wrong edges, which is worse than none.
+
+Three things make the mechanism work, and each is the non-obvious choice:
+
+- **The edge runs from the protection group, not from the host.** `protects` reads with the
+  actor first, and custom-source-to-built-in-target is the direction whose server-side
+  acceptance is established. Reversed, `HOST` would sit in the source position, unverified.
+- **The HOST is resolved, never minted.** A HOST's Smartscape id cannot be computed from a
+  UUID, so it has to come from a lookup table keyed on `dt.smartscape.host`. Our own protection
+  group id *is* computable from its id components, so the computed side is ours — which is why
+  this inverts the NetApp precedent it is adapted from.
+- **The unmatched majority does nothing.** Most protected VMs have no Dynatrace counterpart.
+  They produce no entity, no edge and no row; an unmatched object is not implied to be
+  unprotected.
+
+**Only VMware groups are asked.** Probed on the customer's estate: SQL objects carry no `uuid`
+field at all — the keys are `childObjects`, `entityId`, `environment`, `id`, `name`,
+`objectType`, `osType`, `protectionType`, `sourceId`. Of 59 groups, ~13 are VMware, 18 SQL and
+9 Oracle, so three quarters of the estate can never join and is never asked.
+
+If the VMware objects turn out to carry no usable UUID either, the extension says so as an
+**ERROR** on `cohesity_storage.diagnostics` (`cohesity.diagnostic == "host_link"`) and emits
+nothing. There is no fallback join on object names, deliberately.
+
+### Bounded scale — read this before turning it on
+
+The bridge metric is **one series per protected VM**. That is exactly the cardinality ticket 04
+ruled out of v1, and it is not theoretical: one SQL protection group on the customer's own
+cluster holds 856 objects, and a production Cohesity protects tens of thousands. So the
+mechanism is bounded on purpose, four ways:
+
+| bound | value | why |
+|---|---|---|
+| opt-in | off by default | nobody gets this cardinality without asking |
+| environment | VMware groups only | nothing else publishes a UUID |
+| requests per poll | `min(maxRunFanoutGroups, 5)` groups, rotating | the operator's existing "this cluster is struggling" dial governs both fan-outs |
+| series per poll | `maxHostLinkObjects`, default 200 | request count and series count are different bounds; one group can be one request and 856 series |
+
+When the object cap truncates, that is reported as a **WARN** naming what was left out. Partial
+data here is indistinguishable from part of the estate going unprotected, and nothing else in
+the product would say which — so it is never silent.
+
+**This is the wrong long-term shape, and it is worth saying plainly.** The VM-to-protection-group
+mapping is *configuration*, not telemetry: it changes when somebody edits a backup job, which is
+weekly at most. Its cost should scale with how often it changes, not with how many objects
+exist. Carrying it on a metric also puts per-object API calls on the five-minute poll path of a
+cluster that already answers HTTP 500 on two endpoints.
+
+The better design is the one NetApp uses: **the workflow calls the storage API for the mapping
+itself and writes the lookup tables, with no bridge metric at all.** Zero added cardinality,
+zero added per-poll requests, and the refresh rate matches the change rate. What is shipped here
+proves the edge mechanism end to end — the pipeline, the id computation, the edge direction and
+the sync loop are all the same either way; only the source of the mapping changes. Treat the
+bridge metric as the part to replace.
 
 ## Cohesity permissions
 
@@ -426,6 +535,26 @@ one works with the other.
 ## Known traps
 
 - `dt-sdk` needs the venv's `Scripts`/`bin` on `PATH` (above).
+- **An empty dimension value is dropped, not sent** — so a field the extension failed to find
+  becomes a dimension that silently does not exist. On the customer tenant that hid 28 of 92
+  counted protection runs behind `status: None`, with healthy-looking totals. Anything that
+  discriminates must resolve to a real string or not be emitted at all; see
+  `domain.run_status`. The general rule: a value the ingest would drop is a bug the ingest
+  will not report.
+- **A packaged pipeline processor `description` over 512 characters is rejected at upload**, and
+  `--validate-only` does **not** catch it — that validates the settings object, while the limit
+  is enforced on the packaged extension asset. Two different gates. Keep a processor's rationale
+  in this README, not in its description. `test_no_pipeline_processor_field_exceeds_its_server_limit`
+  is the local check.
+- **A new *required* activation-schema property breaks in-place config upgrades.** Every setting
+  added after the first release is `nullable: true` with no `default` in the schema, and its
+  real default in `config.DEFAULTS`. A nullable property carrying an explicit `""` default is
+  rejected outright by Dynatrace, which is why `_bool`, `_text` and `_int` all fall back to
+  `DEFAULTS` when they are handed `None`.
+- **An extension package cannot create a routing entry on the built-in metrics ingest.** Its own
+  openpipeline source routes its own metrics; a pipeline that has to see Dynatrace's data needs
+  a routing entry created by hand. The host-link pipeline ships inert for exactly this reason —
+  see [`dynatrace/README.md`](dynatrace/README.md).
 - A credential vault entry is resolved by the **EEC**, not by the extension, and the field it is
   injected into is **not** the one named in the schema — and differs between vault and inline
   mode. See [the field-name trap](#the-field-name-trap). `referencedType: TOKEN` is unverified;
@@ -438,15 +567,108 @@ one works with the other.
   them after each one.
 - `/v2/data-protect/runs/summary` has no pagination and no job filter, only a time window, so
   overlapping polls re-return the same run. Count outcomes through `new_protection_runs()`, never
-  by counting `protection_runs()` — the latter triple-counts by design and the symptom looks like
+  by counting `protection_runs()` — the latter double-counts by design and the symptom looks like
   a Cohesity problem.
+- **That same absence of a job filter is why the window has to be small.** On the customer
+  cluster — 41 protection groups, real history — the 15-minute window v0.1.5 sent returned
+  nothing at all inside 120 seconds, and the five run metrics summed to zero over 24 hours while
+  `last_success.age` showed jobs finishing minutes earlier. From v0.1.6 the window is the poll
+  interval plus `client.RUNS_WINDOW_OVERLAP_SECONDS` (120 s) with **both** ends sent explicitly —
+  7 minutes on a 5-minute interval, against 15 before. The overlap is not optional: narrower than
+  the interval drops any run that starts and finishes between two polls, which is the one failure
+  this extension must never report as a success. It is affordable only because the `run.id`
+  ledger discards the duplicates it causes.
+- **If it still will not answer, another endpoint will.** v0.1.6 tries
+  `/v2/data-protect/runs/summary`, then `/v2/data-protect/protection-runs`, then
+  `/v2/data-protect/protection-groups/{id}/runs`, and keeps whichever answered. The flat list is
+  **not** in the 7.3.2 reference this extension was written from, so a 404 from it is an ordinary
+  answer, not a fault. The per-group path is documented for the whole 6.8–7.4 range but costs one
+  request per group. All three report the same `run.id`, which is what makes switching between
+  them mid-flight safe. Which one won is a diagnostic event, `cohesity.diagnostic ==
+  "runs_source"`; the metrics themselves cannot tell you.
+- **The per-group path asks for a count, not a window — and it rotates.** The customer cluster
+  fell through to it, reported `0 run(s) in the window` every poll for twenty minutes, and
+  emitted no `run.*` metric at all while `last_success.age` showed groups finishing minutes
+  earlier. The endpoint was fine; the question was wrong. A ~7-minute window is almost always
+  empty for any *one* group, and a run landing while a different group is being asked is missed
+  forever. From v0.1.7 the per-group path sends **no window** — only `numRuns`
+  (`client.RUNS_PER_GROUP`, 3), the count parameter `GetProtectionGroupRuns` documents for the
+  whole 6.8–7.4 range — and lets the `run.id` ledger discard the repeats, which is what the
+  ledger is for. The per-poll cap became a request budget rather than a filter: it defaults to
+  20 groups (`maxRunFanoutGroups`, settable per cluster, `config.DEFAULT_RUNS_FANOUT_GROUPS`)
+  and **continues where the previous poll stopped**, so on 42 groups every group is reached
+  every two to three polls instead of the same top 10 forever. Most-recently-finished still
+  orders the rotation; a group that fails is skipped, counted and left behind. What the fan-out
+  asked and found each poll is `cohesity.diagnostic == "runs_fanout"`: groups queried, groups
+  errored, runs seen, runs new after dedup. Those four are the only way to tell "nothing ran"
+  from "we are not looking in the right place".
+- **An HTTP 500 usually means the request shape, not the values.** The customer cluster answers
+  500 on `/v2/stats/time-series-stats` for all 20 `entityId` candidates and on
+  `/v2/stats/top-views` for both metrics — the same status for every value, which rules the
+  values out. So from v0.1.6 a 500 (and *only* a 500 — a 401, 403, 404 or 429 is an answer with
+  its own fix) is retried in a short ordered list of alternative shapes, the first that returns
+  200 is cached for the life of the client, and the winner is reported as
+  `cohesity.diagnostic == "param_variant"`. time-series-stats: `metricNames` repeated instead of
+  comma-joined, drop `rollupIntervalSecs`, drop both rollup parameters, a 60-second window, one
+  metric per request. top-views: drop `protocol`, drop `lastHours`, `numTopViews=5`, `metric`
+  alone. Dropping `metric` itself is deliberately **not** a variant — the endpoint would answer
+  200 with its default series and the parser would file it under the metric that was never asked
+  for. The whole probe is capped at `client.MAX_VARIANT_REQUESTS_PER_POLL` (12) extra requests
+  per poll across every endpoint, re-opened by `begin_poll()`, and the count is logged whenever
+  it is non-zero, so a cluster that 500s on everything cannot turn one poll into a request storm.
 - `metricNames` on `/v2/stats/time-series-stats` is `explode: false`: comma-joined into one
   query parameter. Repeat it and the cluster reads only the last value, silently.
 - `dataPoints[]` entries have no `value` field — `int64Value` / `doubleValue` / `stringValue`,
   all nullable, chosen by the sibling `type`.
-- A wrong `entityId` on time-series-stats returns empty `dataPoints` and **no error**. The
-  assumption that `ClusterStatus.clusterId` is that id is flagged in `domain.py` and warned about
-  at runtime; it is unverified against a real cluster.
+- A wrong `entityId` on time-series-stats returns empty `dataPoints` and **no error**. Up to
+  v0.1.3 the extension assumed `ClusterStatus.clusterId` was that id; on a real customer cluster
+  it is not, and all five cluster-level metrics went missing silently. From v0.1.4 the client
+  probes an ordered list of candidates — the id from v1 `/public/cluster` first, then
+  `ClusterStatus.clusterId`, then incarnation ids, then any `entityId` the storage-domain schema
+  catalogue hands out — keeps the first that returns a data point, and caches it per schema for
+  the life of the client. A schema no candidate satisfies emits nothing and warns by name.
+- Storage-domain `stats` field names are not identical across 6.8–7.4. The same customer cluster
+  published `localTierResiliencyImpactBytes` but neither `totalLogicalUsageBytes` nor
+  `localTotalPhysicalUsageBytes`, so `.usage.logical` and `.usage.physical` never arrived.
+  `domain.STORAGE_DOMAIN_LOGICAL_FIELDS` / `…_PHYSICAL_FIELDS` list the accepted spellings in
+  order; the first present and numeric wins, and none present still means no sample, never a zero.
+- Extension log *lines* were not reaching Grail on the tenant this was debugged against, which is
+  why v0.1.4 also emits a handful of log *events* (a different ingest path) once per client
+  lifetime: which entityId each schema resolved to, the sorted key names of the first storage
+  domain's `stats` object, and the cluster software version. Names only — never values, never the
+  API key, never a response body. Query them with
+  `fetch logs | filter log.source == "cohesity_storage.diagnostics"`.
+- **A failing section used to be invisible.** `_section()` catches a collection failure into
+  `self.logger`, and those lines do not reach Grail either — so on the customer cluster six
+  metrics were missing with `collection_success` reading 1 (the cluster *did* answer) and no
+  error readable anywhere. From v0.1.5 every swallowed failure is also a diagnostic event,
+  `cohesity.diagnostic == "section_failure"`, carrying the section label, the exception class,
+  the HTTP status, the request path, the query parameter **names**, and the message truncated to
+  200 characters. The entityId probe reports the same way when a call *raises* rather than
+  returning empty — before v0.1.5 an exception on the first candidate discarded the whole probe
+  and recorded nothing at all. Still once per client per label, and the drain runs after the
+  sections so a failure leaves in the poll that produced it.
+- **Can a protection group be joined to a Dynatrace `HOST`?** (ticket 16) A VMware host
+  publishes its BIOS UUID as `host.additional_system_info["system.serial"]`, which normalises to
+  8-4-4-4-12 hex. Whether Cohesity's per-object `uuid` is that same UUID or a Cohesity-internal
+  id decides whether the enrichment layer is possible at all, and neither the published schema
+  nor anything outside the customer's network answers it. So from v0.1.8 the client asks **one**
+  protection group — the most recently succeeded, unpaused, undeleted one — for **one** run with
+  `includeObjectDetails=true`, **once per client lifetime**, and reports
+  `cohesity.diagnostic == "protected_objects"`: the sorted key names under `objects[].object`,
+  whether a VMware-specific sub-object (`vCenterSummary`) is present and what *it* calls its
+  keys, the group's environment (`kVMware`, `kSQL`, `kPhysical`, …), and for up to three objects
+  the `uuid` value with a shape verdict. The verdict tests for a decimal id **before** testing
+  for hex, because 32 decimal digits are also 32 valid hex digits and a purely structural test
+  would report Cohesity's own int64 id as a UUID — the exact opposite of the right answer. The
+  probe cannot raise, cannot run twice, and a 403 on it costs nothing: the run metrics that
+  v0.1.7 finally got working are reported either way. Object names, addresses and everything
+  else identifying stay behind as field *names*, never as values.
+- Every diagnostic message is redacted before it leaves: the configured API key and the
+  credential-vault id are removed by identity, and anything credential-shaped (`token=…`, a run
+  of 20+ opaque characters) by shape. The auth message names the vault entry on purpose — a
+  rejected credential and an unresolved one have different fixes — but a log record has a wider
+  audience than the ActiveGate's own logs.
 
 ## Layout
 
@@ -457,6 +679,12 @@ extension/
   openpipeline/
     metrics.source.json   routes this extension's metrics to the pipeline below
     metrics.pipeline.json smartscape node and edge extraction - the entity model
+    host-link.pipeline.json  runs on DYNATRACE's host metrics - the protection group -> HOST edge
+dynatrace/                tenant assets installed by hand, NOT shipped in the zip
+  README.md               what each one is and the five steps to deploy them
+  routing-host-link.json  the routing entry that feeds host metrics to the pipeline above
+  sync-host-link-task.js  the workflow that keeps the lookup tables current
+  workflow-sync-host-link.json  the same script, importable
 cohesity_storage/
   __main__.py             scheduling and reporting - the Extension subclass
   config.py               cluster parsing and validation
@@ -477,8 +705,10 @@ tests/
   test_metrics.py         key prefixes, dimension keys, the ticket 06 contract
   test_reporting.py       fixture bodies to samples - the whole metric path, no EEC
   test_manifest.py        extension.yaml, activation schema and pipeline JSON vs the code
+  test_host_link.py       uuid normalisation, the bridge metric, the lookup-table encoder
 tools/
   local_cohesity_server.py  runnable fake cluster for dt-sdk run
+  host_link.py              reference lookup-table encoder; the workflow JS mirrors it
 ```
 
 ## License

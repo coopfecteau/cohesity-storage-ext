@@ -172,6 +172,32 @@
           "default": true,
           "maxItems": 1
         },
+        "collectHostLink": {
+          "displayName": "Link protection groups to Dynatrace hosts (VMware only)",
+          "description": "Off by default, and the only collection that is. When on, the extension asks a few VMware protection groups per poll for the BIOS UUID of each VM they back up, and emits one metric line per VM so a workflow can draw a 'protects' edge from the protection group to the Dynatrace HOST. That is ONE SERIES PER PROTECTED VM - a bounded-scale mechanism, not a general one - so it is capped by 'Protected objects per poll' below and restricted to VMware groups, which are the only ones that publish a UUID at all. It also does nothing on its own: the OpenPipeline routing entry and the sync workflow have to be installed once. See the extension README.",
+          "type": "boolean",
+          "nullable": true,
+          "maxItems": 1
+        },
+        "maxHostLinkObjects": {
+          "displayName": "Protected objects per poll (host link cap)",
+          "description": "The hard ceiling on how many protected VMs one poll may publish as metric lines, and therefore on the cardinality this feature can add. When the cap truncates, the extension says so as a WARN on its diagnostics log channel - the mapping published is then PARTIAL and hosts beyond the cap get no edge, which would otherwise look exactly like part of the estate going unprotected. Raise it only if the resulting series count is acceptable on this tenant.",
+          "type": "integer",
+          "nullable": true,
+          "constraints": [
+            {
+              "type": "RANGE",
+              "minimum": 1,
+              "maximum": 10000
+            }
+          ],
+          "maxItems": 1,
+          "precondition": {
+            "type": "EQUALS",
+            "property": "collectHostLink",
+            "expectedValue": true
+          }
+        },
         "intervalMinutes": {
           "displayName": "Poll every (minutes)",
           "description": "Cluster capacity moves slowly. Polling faster than the cluster's own stats refresh only costs API calls.",
@@ -197,6 +223,21 @@
               "type": "RANGE",
               "minimum": 1,
               "maximum": 300
+            }
+          ],
+          "maxItems": 1
+        },
+        "maxRunFanoutGroups": {
+          "displayName": "Run fan-out budget (protection groups per poll)",
+          "description": "Only used when the cluster-wide runs endpoints are unavailable and runs have to be read one protection group at a time. This is how many requests one poll may spend on that, not a limit on how many groups are monitored: the fan-out continues from where the previous poll stopped, so every group is reached within (groups / this) polls. Lower it on a cluster that is struggling to answer; raise it to see every group sooner.",
+          "type": "integer",
+          "nullable": false,
+          "default": 20,
+          "constraints": [
+            {
+              "type": "RANGE",
+              "minimum": 1,
+              "maximum": 500
             }
           ],
           "maxItems": 1
