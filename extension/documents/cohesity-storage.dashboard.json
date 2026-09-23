@@ -9,8 +9,8 @@
     "2": {
       "type": "data",
       "title": "Protection run outcomes over time",
-      "description": "Delta counter of runs reaching a terminal status, summed per interval and split by status.",
-      "query": "timeseries runs = sum(cohesity.protectiongroup.run.outcome), by:{status}",
+      "description": "Delta counter of runs reaching a terminal status, summed per interval and split by status. Runs that arrive without a status dimension are labelled Unknown rather than charted as an unnamed series.",
+      "query": "timeseries runs = sum(cohesity.protectiongroup.run.outcome), by:{status}\n| fieldsAdd status = coalesce(status, \"Unknown\")",
       "visualization": "barChart",
       "visualizationSettings": {
         "chartSettings": {
@@ -26,8 +26,8 @@
     "3": {
       "type": "data",
       "title": "Run outcomes in this timeframe",
-      "description": "Summed, not averaged - this is a delta counter. An empty tile means no run finished in the timeframe, which is not the same as every run succeeding.",
-      "query": "timeseries runs = sum(cohesity.protectiongroup.run.outcome, scalar:true), by:{status}\n| filter runs > 0\n| fields Outcome = status, Runs = runs\n| sort Runs desc",
+      "description": "Summed, not averaged - this is a delta counter. An empty tile means no run finished in the timeframe, which is not the same as every run succeeding. An Unknown slice is a run the cluster reported with no terminal status attached, not a run that failed.",
+      "query": "timeseries runs = sum(cohesity.protectiongroup.run.outcome, scalar:true), by:{status}\n| filter runs > 0\n| fields Outcome = coalesce(status, \"Unknown\"), Runs = runs\n| sort Runs desc",
       "visualization": "donutChart",
       "visualizationSettings": {
         "dataMapping": { "value": "Runs", "displayedFields": ["Outcome"] },
@@ -117,7 +117,7 @@
     },
     "10": {
       "type": "markdown",
-      "content": "## 2 - Is capacity running out?\n\nThe slower burn that nobody looks at until it is urgent. Used percentage is **computed here from `capacity.used` and `capacity.total`** - the extension deliberately ingests no `used_pct` metric, because a stored derivative drifts from its inputs the moment one poll succeeds and the other fails. Garbage bytes are not free space."
+      "content": "## 2 - Is capacity running out?\n\nThe slower burn that nobody looks at until it is urgent. Used percentage is **computed here from `capacity.used` and `capacity.total`** - the extension deliberately ingests no `used_pct` metric, because a stored derivative drifts from its inputs the moment one poll succeeds and the other fails. Resiliency overhead is not free space either: it is capacity the cluster holds for erasure coding or replication and will never hand back. Garbage bytes belong in this picture too, but this cluster is not serving them - see section 5."
     },
     "11": {
       "type": "data",
@@ -226,22 +226,22 @@
       },
       "querySettings": {}
     },
-    "16": {
+    "21": {
       "type": "data",
-      "title": "Garbage awaiting collection",
-      "description": "Bytes held by data pending garbage collection. Capacity planning must not count these as free.",
-      "query": "timeseries garbage = avg(cohesity.cluster.garbage.bytes)\n| fields `Garbage awaiting collection` = arrayLast(garbage)",
+      "title": "Resiliency overhead",
+      "description": "Bytes consumed cluster-wide by erasure coding or replication, summed across storage domains. Capacity the cluster holds and will never hand back, so capacity planning must not count it as free.",
+      "query": "timeseries resiliency = sum(cohesity.storagedomain.resiliency.bytes)\n| fields `Resiliency overhead` = arrayLast(resiliency)",
       "visualization": "singleValue",
       "visualizationSettings": {
         "singleValue": {
-          "recordField": "Garbage awaiting collection",
-          "label": "Garbage",
+          "recordField": "Resiliency overhead",
+          "label": "Resiliency overhead",
           "showLabel": true,
           "sparklineSettings": { "isVisible": false },
           "trend": { "isVisible": false }
         },
         "unitsOverrides": [
-          { "identifier": "Garbage awaiting collection", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+          { "identifier": "Resiliency overhead", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
         ]
       },
       "querySettings": {}
@@ -323,11 +323,32 @@
     },
     "30": {
       "type": "markdown",
-      "content": "## 3 - Is the cluster healthy right now?\n\nCPU, memory and I/O. Latency is in **microseconds** and is deliberately not converted - flash-backed Cohesity routinely serves sub-millisecond, and dividing by 1000 would round the whole signal away."
+      "content": "## 3 - Where is the data actually moving?\n\nPer-view read and write throughput, from the cluster's top-views ranking. **Expect gaps.** The endpoint behind this metric answers intermittently - it went silent for days and recovered on its own - so a bar appears only for the intervals the cluster answered. A gap here is the cluster declining to rank, not the view going idle, and not the extension failing: section 4 is what tells you that.\n\nCPU, memory and I/O used to sit in this section. They come from a different cluster endpoint that is currently down, so they have moved to section 5."
+    },
+    "35": {
+      "type": "data",
+      "title": "View throughput over time",
+      "description": "Summed across the ranked views and split by direction. Sparse by design - see the section note.",
+      "query": "timeseries Throughput = sum(cohesity.cluster.view.throughput), by:{operation}",
+      "visualization": "barChart",
+      "visualizationSettings": {
+        "chartSettings": {
+          "xAxisScaling": "analyzedTimeframe",
+          "gapPolicy": "gap",
+          "legend": { "position": "bottom" }
+        },
+        "seriesConfig": { "gapPolicy": "gap" },
+        "layout": { "groupMode": "stacked", "position": "vertical" },
+        "unitsOverrides": [
+          { "identifier": "Throughput", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+        ]
+      },
+      "querySettings": {}
     },
     "31": {
       "type": "data",
       "title": "CPU and memory",
+      "description": "From /stats/time-series-stats - see the section note.",
       "query": "timeseries { CPU = avg(cohesity.cluster.cpu.usage), Memory = avg(cohesity.cluster.memory.usage) }, by:{cohesity.cluster.name}",
       "visualization": "lineChart",
       "visualizationSettings": {
@@ -346,6 +367,7 @@
     "32": {
       "type": "data",
       "title": "IOPS by operation",
+      "description": "From /stats/time-series-stats - see the section note.",
       "query": "timeseries IOPS = avg(cohesity.cluster.io.iops), by:{operation}",
       "visualization": "lineChart",
       "visualizationSettings": {
@@ -361,7 +383,7 @@
     "33": {
       "type": "data",
       "title": "I/O latency by operation",
-      "description": "Microseconds. Not converted to milliseconds - sub-millisecond is the signal on flash.",
+      "description": "Microseconds. Not converted to milliseconds - sub-millisecond is the signal on flash. From /stats/time-series-stats - see the section note.",
       "query": "timeseries Latency = avg(cohesity.cluster.io.latency), by:{operation}",
       "visualization": "lineChart",
       "visualizationSettings": {
@@ -449,6 +471,30 @@
         "seriesConfig": { "curve": "linear", "gapPolicy": "gap" }
       },
       "querySettings": {}
+    },
+    "50": {
+      "type": "markdown",
+      "content": "## 5 - Metrics this cluster is not serving\n\nThe four tiles below are wired correctly and are blank for a reason outside Dynatrace. CPU, memory, IOPS, latency and garbage bytes all come from the cluster's `/stats/time-series-stats` endpoint, and on this cluster that endpoint answers **HTTP 500** - for every `entityId` shape the extension knows how to ask with. Nothing is being dropped on the way in: section 4 shows collection succeeding throughout.\n\nThey are kept rather than deleted because this failure is **intermittent, not permanent**. The `/stats/top-views` endpoint behind section 3 failed exactly the same way for days and recovered with no intervention. These tiles need no redeploy to come back - the moment the cluster answers, they fill in.\n\nIf they are still blank, the thing to investigate is the Cohesity cluster, not the extension."
+    },
+    "16": {
+      "type": "data",
+      "title": "Garbage awaiting collection",
+      "description": "Bytes held by data pending garbage collection. Capacity planning must not count these as free. From /stats/time-series-stats - see the section note.",
+      "query": "timeseries garbage = avg(cohesity.cluster.garbage.bytes)\n| fields `Garbage awaiting collection` = arrayLast(garbage)",
+      "visualization": "singleValue",
+      "visualizationSettings": {
+        "singleValue": {
+          "recordField": "Garbage awaiting collection",
+          "label": "Garbage",
+          "showLabel": true,
+          "sparklineSettings": { "isVisible": false },
+          "trend": { "isVisible": false }
+        },
+        "unitsOverrides": [
+          { "identifier": "Garbage awaiting collection", "unitCategory": "data", "baseUnit": "byte", "displayUnit": null, "decimals": 2, "suffix": "", "delimiter": false }
+        ]
+      },
+      "querySettings": {}
     }
   },
   "layouts": {
@@ -465,19 +511,22 @@
     "13": { "x": 8, "y": 19, "w": 4, "h": 4 },
     "14": { "x": 12, "y": 19, "w": 4, "h": 4 },
     "15": { "x": 16, "y": 19, "w": 4, "h": 4 },
-    "16": { "x": 20, "y": 19, "w": 4, "h": 4 },
+    "21": { "x": 20, "y": 19, "w": 4, "h": 4 },
     "17": { "x": 0, "y": 23, "w": 12, "h": 6 },
     "18": { "x": 12, "y": 23, "w": 12, "h": 6 },
     "19": { "x": 0, "y": 29, "w": 14, "h": 8 },
     "20": { "x": 14, "y": 29, "w": 10, "h": 8 },
-    "30": { "x": 0, "y": 37, "w": 24, "h": 2 },
-    "31": { "x": 0, "y": 39, "w": 12, "h": 6 },
-    "32": { "x": 12, "y": 39, "w": 12, "h": 6 },
-    "33": { "x": 0, "y": 45, "w": 12, "h": 6 },
-    "34": { "x": 12, "y": 45, "w": 12, "h": 6 },
-    "40": { "x": 0, "y": 51, "w": 24, "h": 2 },
-    "41": { "x": 0, "y": 53, "w": 6, "h": 4 },
-    "42": { "x": 6, "y": 53, "w": 18, "h": 4 }
+    "30": { "x": 0, "y": 37, "w": 24, "h": 3 },
+    "34": { "x": 0, "y": 40, "w": 12, "h": 7 },
+    "35": { "x": 12, "y": 40, "w": 12, "h": 7 },
+    "40": { "x": 0, "y": 47, "w": 24, "h": 2 },
+    "41": { "x": 0, "y": 49, "w": 6, "h": 4 },
+    "42": { "x": 6, "y": 49, "w": 18, "h": 4 },
+    "50": { "x": 0, "y": 53, "w": 24, "h": 4 },
+    "31": { "x": 0, "y": 57, "w": 6, "h": 6 },
+    "32": { "x": 6, "y": 57, "w": 6, "h": 6 },
+    "33": { "x": 12, "y": 57, "w": 6, "h": 6 },
+    "16": { "x": 18, "y": 57, "w": 6, "h": 6 }
   },
   "settings": {
     "gridLayout": { "columnsCount": 24 }
