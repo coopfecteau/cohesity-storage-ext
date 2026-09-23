@@ -303,10 +303,12 @@ class StubTransport:
     def __init__(self, answers: dict[str, object]):
         self._answers = answers
         self.asked: list[str] = []
+        self.params: list[dict] = []
 
-    def get(self, path, params=None, *, prefix="/v2"):  # noqa: ARG002 - matches the real signature
+    def get(self, path, params=None, *, prefix="/v2"):
         full = f"{prefix}{path}"
         self.asked.append(full)
+        self.params.append(dict(params or {}))
         answer = self._answers.get(full)
         if isinstance(answer, Exception):
             raise answer
@@ -444,3 +446,112 @@ class TestEveryFactKindIsHandled:
         # The behaviour above is a coverage requirement, not a licence to invent a record for
         # a fact nobody has written a sentence for.
         assert metrics.diagnostic_log_events("1", "prod", "7.3.2", [{"kind": "nonsense"}]) == []
+
+
+class TestSeverityFloor:
+    """The floor exists to stop info-level alerts eating the per-poll budget."""
+
+    def test_the_floor_admits_itself_and_everything_above(self):
+        assert domain.alert_severities_at_or_above("info") == ["kCritical", "kWarning", "kInfo"]
+        assert domain.alert_severities_at_or_above("warning") == ["kCritical", "kWarning"]
+        assert domain.alert_severities_at_or_above("critical") == ["kCritical"]
+
+    def test_an_unreadable_floor_opens_the_gate(self):
+        # Collecting less than was asked for is the worse failure: nobody notices a missing
+        # alert until the one that mattered is missing.
+        assert domain.alert_floor("nonsense") == domain.ALERT_SEVERITY_INFO
+        assert domain.alert_floor(None) == domain.ALERT_SEVERITY_INFO
+        assert domain.alert_floor("") == domain.ALERT_SEVERITY_INFO
+
+    def test_an_unmapped_severity_is_never_filtered_out(self):
+        # It could be anything, including the most serious thing the cluster has ever said. A
+        # floor is an instruction about severity, not a licence to discard the unreadable.
+        parsed = domain.parse_alerts([alert(severity="kNovel")])
+
+        assert domain.alert_meets_floor(parsed[0], "critical") is True
+
+    def test_filtering_reports_how_many_it_dropped(self):
+        parsed = domain.parse_alerts(
+            [alert(id="1", severity="kInfo"), alert(id="2", severity="kCritical")]
+        )
+
+        kept, dropped = domain.alerts_at_or_above(parsed, "warning")
+
+        assert [a.severity for a in kept] == ["critical"]
+        assert dropped == 1
+
+
+class TestFloorIsSentToTheCluster:
+    """Filtering after the fact would not free any budget - the cap is on the response."""
+
+    def test_the_floor_goes_out_as_a_request_parameter(self):
+        client = client_with({V2: BODY})
+        client.alerts(severity_floor="warning")
+
+        sent = client._transport.params[-1]
+        assert "alertSeverityList" in sent
+        assert list(sent["alertSeverityList"]) == ["kCritical", "kWarning"]
+
+    def test_the_default_floor_sends_no_filter_at_all(self):
+        # Asking for everything is not a filter, and sending one would be a parameter the
+        # cluster could reject for no benefit.
+        client = client_with({V2: BODY})
+        client.alerts()
+
+        assert "alertSeverityList" not in client._transport.params[-1]
+
+    def test_a_cluster_that_honours_the_filter_produces_no_complaint(self):
+        client = client_with({V2: {"alerts": [{"id": "a", "severity": "kCritical"}]}})
+        client.alerts(severity_floor="warning")
+
+        kinds = [fact.get("kind") for fact in client.take_diagnostics()]
+        assert "alert_floor_ignored" not in kinds
+
+    def test_a_cluster_that_ignores_the_filter_is_reported(self):
+        # The alerts are still correct - but the budget was spent on ones nobody wanted, and
+        # only this record would ever say so.
+        client = client_with(
+            {V2: {"alerts": [{"id": "a", "severity": "kInfo"}, {"id": "b", "severity": "kCritical"}]}}
+        )
+        kept = client.alerts(severity_floor="warning")
+
+        assert [a.severity for a in kept] == ["critical"]
+        fact = next(f for f in client.take_diagnostics() if f.get("kind") == "alert_floor_ignored")
+        assert fact["dropped"] == 1
+        assert fact["returned"] == 2
+
+
+class TestFloorConfiguration:
+    def test_the_default_collects_everything(self):
+        # An upgrade must never silently start collecting less than it did yesterday.
+        config = ClusterConfig.from_dict({"name": "c", "host": "h", "apiKey": "k"})
+
+        assert config.alert_severity_floor == domain.ALERT_SEVERITY_INFO
+
+    def test_a_chosen_floor_is_read(self):
+        config = ClusterConfig.from_dict(
+            {"name": "c", "host": "h", "apiKey": "k", "alertSeverityFloor": "warning"}
+        )
+
+        assert config.alert_severity_floor == "warning"
+
+    def test_a_floor_the_schema_should_have_prevented_falls_open(self):
+        config = ClusterConfig.from_dict(
+            {"name": "c", "host": "h", "apiKey": "k", "alertSeverityFloor": "URGENT!"}
+        )
+
+        assert config.alert_severity_floor == domain.ALERT_SEVERITY_INFO
+
+    def test_every_floor_the_schema_offers_is_one_the_code_accepts(self):
+        # The dropdown and the parser have to agree, or a value the UI offers silently becomes
+        # "info" and the operator's choice is ignored.
+        schema = json.loads(
+            (Path(__file__).resolve().parents[1] / "extension" / "activationSchema.json")
+            .read_text(encoding="utf-8")
+        )
+        offered = [item["value"] for item in schema["enums"]["alertSeverityFloor"]["items"]]
+
+        assert offered
+        for value in offered:
+            assert domain.alert_floor(value) == value, value
+        assert set(offered) == set(domain.ALERT_SEVERITY_ORDER)

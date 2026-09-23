@@ -473,6 +473,28 @@ later fails, the chain is re-walked, because a cached failure on an intermittent
 cluster would turn a temporary 500 into a silence only a restart could clear. Which one won is
 reported on the diagnostics channel as `alert_source`.
 
+### Choosing a severity floor
+
+*Alert severity floor* — **Info and above** (default), **Warning and above**, or **Critical
+only**.
+
+It is sent to the cluster as a request filter, not applied after the fact, and that difference
+is the whole point. The per-poll cap limits what the cluster *returns*, so filtering locally
+would still let info-level alerts consume the budget and crowd out the critical ones.
+
+On the cluster this was built against the cap binds: a 24h window holds more alerts than one
+poll may read, and info was about 40% of them. Warning-and-above is the setting worth choosing
+there. The default is still everything, because an upgrade should never silently start
+collecting less than it did the day before.
+
+If the cluster ignores the filter, the alerts are still correct — they are dropped locally —
+but the budget was spent on alerts nobody asked for. That case is reported on the diagnostics
+channel rather than left to be inferred from a count that looks slightly wrong.
+
+An alert whose severity could not be mapped is **never** filtered out, whatever the floor. It
+could be anything, including the most serious thing the cluster has ever said, and a floor is
+an instruction about severity rather than a licence to discard what could not be read.
+
 ### What the customer cluster actually sends
 
 Measured on the first poll with alerts on, across 100 alert records:

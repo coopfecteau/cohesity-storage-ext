@@ -254,7 +254,12 @@
           "description": "On by default, and only consulted when alerts are collected. The description is the sentence that says what actually broke, and it is also the only alert field that can contain a name from the protected estate - a datastore, a share, occasionally a VM. Turn it off to keep the alert and drop the sentence: id, name, severity, category, state and timestamps are all still sent.",
           "type": "boolean",
           "nullable": true,
-          "maxItems": 1
+          "maxItems": 1,
+          "precondition": {
+            "type": "EQUALS",
+            "property": "collectAlerts",
+            "expectedValue": true
+          }
         },
         "alertLookbackHours": {
           "displayName": "Alert lookback (hours)",
@@ -268,7 +273,12 @@
               "maximum": 168
             }
           ],
-          "maxItems": 1
+          "maxItems": 1,
+          "precondition": {
+            "type": "EQUALS",
+            "property": "collectAlerts",
+            "expectedValue": true
+          }
         },
         "maxAlerts": {
           "displayName": "Maximum alerts per poll",
@@ -282,7 +292,26 @@
               "maximum": 1000
             }
           ],
-          "maxItems": 1
+          "maxItems": 1,
+          "precondition": {
+            "type": "EQUALS",
+            "property": "collectAlerts",
+            "expectedValue": true
+          }
+        },
+        "alertSeverityFloor": {
+          "displayName": "Alert severity floor",
+          "description": "The least severe alert worth sending, applied as a REQUEST filter so that less severe alerts do not consume the per-poll budget below. That matters: on the cluster this was built against, a 24h window holds more alerts than one poll may read, so info-level alerts were crowding out critical ones after every restart. If the cluster ignores the filter the extension still drops them locally and says so on the diagnostics channel - the budget is just not recovered.",
+          "type": {
+            "$ref": "#/enums/alertSeverityFloor"
+          },
+          "nullable": true,
+          "maxItems": 1,
+          "precondition": {
+            "type": "EQUALS",
+            "property": "collectAlerts",
+            "expectedValue": true
+          }
         }
       }
     },
@@ -313,6 +342,28 @@
       "type": {
         "$ref": "#/types/pythonRemote"
       }
+    }
+  },
+  "enums": {
+    "alertSeverityFloor": {
+      "displayName": "Alert severity floor",
+      "description": "The least severe alert worth sending.",
+      "documentation": "",
+      "type": "enum",
+      "items": [
+        {
+          "value": "info",
+          "displayName": "Info and above (everything)"
+        },
+        {
+          "value": "warning",
+          "displayName": "Warning and above"
+        },
+        {
+          "value": "critical",
+          "displayName": "Critical only"
+        }
+      ]
     }
   }
 }

@@ -1629,6 +1629,68 @@ def alert_shape(payload: Any) -> dict[str, Any]:
         "with_description": sum(1 for alert in alerts if alert.description),
     }
 
+
+#: Severity order, least to most severe. "unknown" is deliberately absent - see
+#: :func:`alert_meets_floor`.
+ALERT_SEVERITY_ORDER = (
+    ALERT_SEVERITY_INFO,
+    ALERT_SEVERITY_WARNING,
+    ALERT_SEVERITY_CRITICAL,
+)
+
+#: What each level is called on the wire, for the request-side filter.
+ALERT_SEVERITY_WIRE = {
+    ALERT_SEVERITY_INFO: "kInfo",
+    ALERT_SEVERITY_WARNING: "kWarning",
+    ALERT_SEVERITY_CRITICAL: "kCritical",
+}
+
+
+def alert_floor(value: Any) -> str:
+    """A configured floor, or ``info`` - which lets everything through.
+
+    An unreadable floor opens the gate rather than closing it. Silently collecting less than
+    asked for is the worse failure: nobody notices missing alerts until the one that mattered
+    is missing.
+    """
+    text = _text(value).strip().lower()
+    return text if text in ALERT_SEVERITY_ORDER else ALERT_SEVERITY_INFO
+
+
+def alert_severities_at_or_above(floor: str) -> list[str]:
+    """Wire names for every severity the floor admits, most severe first."""
+    start = ALERT_SEVERITY_ORDER.index(alert_floor(floor))
+    return [ALERT_SEVERITY_WIRE[name] for name in reversed(ALERT_SEVERITY_ORDER[start:])]
+
+
+def alert_meets_floor(alert: Alert, floor: str) -> bool:
+    """Whether this alert is severe enough to report.
+
+    An alert whose severity did not map is ALWAYS kept, whatever the floor. It could be
+    anything, including the most serious thing the cluster has ever said, and a floor is an
+    instruction about severity rather than a licence to discard what could not be read. It is
+    already reported at WARN and named on the diagnostics channel so the map can be fixed.
+    """
+    if alert.severity == ALERT_SEVERITY_UNKNOWN:
+        return True
+    try:
+        return ALERT_SEVERITY_ORDER.index(alert.severity) >= ALERT_SEVERITY_ORDER.index(
+            alert_floor(floor)
+        )
+    except ValueError:
+        return True
+
+
+def alerts_at_or_above(alerts: list[Alert], floor: str) -> tuple[list[Alert], int]:
+    """The alerts that clear the floor, and the count dropped, as ``(kept, dropped)``.
+
+    The count is returned rather than discarded because it is the only evidence of whether the
+    cluster honoured the request-side filter: if anything had to be dropped here, the parameter
+    did nothing and the per-poll budget was spent on alerts nobody asked for.
+    """
+    kept = [alert for alert in alerts if alert_meets_floor(alert, floor)]
+    return kept, len(alerts) - len(kept)
+
 __all__ = [
     "ALERT_DESCRIPTION_FIELDS",
     "ALERT_FIRST_TIME_FIELDS",
@@ -1638,8 +1700,10 @@ __all__ = [
     "ALERT_NESTED_BLOCKS",
     "ALERT_SEVERITY_CRITICAL",
     "ALERT_SEVERITY_INFO",
+    "ALERT_SEVERITY_ORDER",
     "ALERT_SEVERITY_UNKNOWN",
     "ALERT_SEVERITY_WARNING",
+    "ALERT_SEVERITY_WIRE",
     "Alert",
     "BIOS_UUID_FIELDS",
     "CLUSTER_ALTERNATE_ID_FIELDS",
@@ -1678,8 +1742,12 @@ __all__ = [
     "VMWARE_OBJECT_BLOCKS",
     "VMWARE_SUMMARY_HINTS",
     "ViewStats",
+    "alert_floor",
+    "alert_meets_floor",
+    "alert_severities_at_or_above",
     "alert_severity",
     "alert_shape",
+    "alerts_at_or_above",
     "bios_uuid",
     "bios_uuid_verdict",
     "candidate_uuid_fields",

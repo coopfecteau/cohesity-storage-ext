@@ -1391,7 +1391,13 @@ class CohesityClient:
 
     # -- alerts ------------------------------------------------------------
 
-    def alerts(self, *, lookback_hours: int = 24, max_alerts: int = 100) -> list[domain.Alert]:
+    def alerts(
+        self,
+        *,
+        lookback_hours: int = 24,
+        max_alerts: int = 100,
+        severity_floor: str = domain.ALERT_SEVERITY_INFO,
+    ) -> list[domain.Alert]:
         """Open cluster alerts, from whichever alert path this cluster actually serves.
 
         Two candidates, tried in order and remembered once one answers. This is the same shape
@@ -1410,6 +1416,14 @@ class CohesityClient:
         for name, path, prefix in self._alert_sources():
             params = dict(window)
             params["maxAlerts"] = max_alerts
+            # Sent as a REQUEST filter, not applied after the fact. maxAlerts caps what the
+            # cluster returns, so filtering locally would still let info-level alerts consume
+            # the budget and crowd out the critical ones - which is the whole reason the floor
+            # exists. Whether this cluster honours the parameter is checked below rather than
+            # assumed.
+            wanted = domain.alert_severities_at_or_above(severity_floor)
+            if len(wanted) < len(domain.ALERT_SEVERITY_ORDER):
+                params["alertSeverityList"] = Repeated(wanted)
             try:
                 payload = self._transport.get(path, params, prefix=prefix)
             except CohesityError as exception:
@@ -1431,7 +1445,24 @@ class CohesityClient:
                     {"kind": "alert_source", "source": name, "path": f"{prefix}{path}"},
                 )
             self._diagnose("alertShape", {"kind": "alert_shape", **domain.alert_shape(payload)})
-            return domain.parse_alerts(payload)
+            parsed = domain.parse_alerts(payload)
+            kept, dropped = domain.alerts_at_or_above(parsed, severity_floor)
+            if dropped:
+                # The cluster ignored alertSeverityList. The alerts are still filtered - the
+                # operator gets what they asked for - but the per-poll budget was spent on
+                # alerts nobody wanted, so the cap can still be crowding out severe ones and
+                # raising it is the only remaining lever.
+                self._diagnose(
+                    "alertFloorIgnored",
+                    {
+                        "kind": "alert_floor_ignored",
+                        "floor": domain.alert_floor(severity_floor),
+                        "dropped": dropped,
+                        "returned": len(parsed),
+                        "max_alerts": max_alerts,
+                    },
+                )
+            return kept
         if last_error is not None:
             raise last_error
         return []
@@ -1461,7 +1492,13 @@ class CohesityClient:
         """Which alert path answered, for the fastcheck line. Empty until one has."""
         return self._alert_source
 
-    def new_alerts(self, *, lookback_hours: int = 24, max_alerts: int = 100) -> list[domain.Alert]:
+    def new_alerts(
+        self,
+        *,
+        lookback_hours: int = 24,
+        max_alerts: int = 100,
+        severity_floor: str = domain.ALERT_SEVERITY_INFO,
+    ) -> list[domain.Alert]:
         """Alerts not seen before on this client.
 
         The window has to be wider than the poll interval or an alert that fires just after a
@@ -1470,7 +1507,11 @@ class CohesityClient:
         why a re-fire is a new record and a still-open alert is not.
         """
         return domain.new_alerts(
-            self.alerts(lookback_hours=lookback_hours, max_alerts=max_alerts),
+            self.alerts(
+                lookback_hours=lookback_hours,
+                max_alerts=max_alerts,
+                severity_floor=severity_floor,
+            ),
             self._alert_ledger,
         )
 

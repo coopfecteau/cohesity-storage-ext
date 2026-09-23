@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from . import domain
+
 # The scaffold required the API key to be a UUID, because that is the shape Cohesity shows when
 # a key is created. Ticket 07 relaxed it to "non-empty, no whitespace", which is what the
 # scaffold's own note recommended: the UUID shape is a guess about key format across 6.8-7.4,
@@ -109,6 +111,11 @@ DEFAULT_ALERT_LOOKBACK_HOURS = 24
 # 24h window, i.e. it hit the cap on the first try, and a cap that binds silently is how a
 # cluster in a bad state gets quieter in Dynatrace rather than louder.
 DEFAULT_MAX_ALERTS = 250
+# Everything, so an upgrade never silently starts collecting LESS than it did yesterday.
+# "warning" is the setting worth choosing on a cluster where the cap binds - the UI says
+# so - but that is the operator's call to make, not one to make on their behalf during an
+# upgrade they did not read the notes for.
+DEFAULT_ALERT_SEVERITY_FLOOR = "info"
 
 DEFAULTS = {
     "port": 443,
@@ -126,6 +133,7 @@ DEFAULTS = {
     "alertDescriptions": DEFAULT_ALERT_DESCRIPTIONS,
     "alertLookbackHours": DEFAULT_ALERT_LOOKBACK_HOURS,
     "maxAlerts": DEFAULT_MAX_ALERTS,
+    "alertSeverityFloor": DEFAULT_ALERT_SEVERITY_FLOOR,
     "fixtureDir": "",
 }
 
@@ -181,6 +189,9 @@ class ClusterConfig:
     alert_descriptions: bool = DEFAULT_ALERT_DESCRIPTIONS
     alert_lookback_hours: int = DEFAULT_ALERT_LOOKBACK_HOURS
     max_alerts: int = DEFAULT_MAX_ALERTS
+    # The least severe alert worth sending, applied as a request filter so that less
+    # severe alerts do not consume the per-poll budget.
+    alert_severity_floor: str = DEFAULT_ALERT_SEVERITY_FLOOR
     # Replay mode. When set, every response is read from recorded JSON in this directory and no
     # request leaves the ActiveGate. It is one setting rather than a code path so that "we got
     # credentials" is a configuration change, not a rewrite - and so that the code above the
@@ -259,6 +270,10 @@ class ClusterConfig:
             alert_descriptions=_bool(raw, "alertDescriptions"),
             alert_lookback_hours=_int(raw, "alertLookbackHours", label, minimum=1, maximum=168),
             max_alerts=_int(raw, "maxAlerts", label, minimum=1, maximum=1000),
+            # Through alert_floor rather than _text: an unreadable floor opens the gate
+            # rather than closing it, because silently collecting less than was asked for
+            # is the worse failure.
+            alert_severity_floor=domain.alert_floor(raw.get("alertSeverityFloor")),
             fixture_dir=_text(raw, "fixtureDir"),
         )
         config._validate_auth()

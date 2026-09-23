@@ -1,5 +1,5 @@
 name: custom:cohesity.storage
-version: 0.2.2
+version: 0.2.3
 # Floor settled by ticket 03 against the release-tagged schema repo, not guessed. The binding
 # constraint is documents.screens (1.341); openpipeline smartscape lands earlier, at 1.330.
 minDynatraceVersion: "1.341.0"

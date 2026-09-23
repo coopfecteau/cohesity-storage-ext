@@ -408,7 +408,9 @@ class ExtensionImpl(Extension):
         log lines do not.
         """
         alerts = client.new_alerts(
-            lookback_hours=config.alert_lookback_hours, max_alerts=config.max_alerts
+            lookback_hours=config.alert_lookback_hours,
+            max_alerts=config.max_alerts,
+            severity_floor=config.alert_severity_floor,
         )
         if not alerts:
             return
@@ -427,7 +429,8 @@ class ExtensionImpl(Extension):
             f"{cluster_name}: {len(alerts)} new alert(s) "
             f"({', '.join(f'{name}:{count}' for name, count in sorted(by_severity.items()))}); "
             f"read from {client.alert_source or 'no endpoint'}; "
-            f"{client.counted_alert_ids} occurrence(s) held against re-sending"
+            f"{client.counted_alert_ids} occurrence(s) held against re-sending; "
+            f"floor {config.alert_severity_floor}"
             f"{'' if config.alert_descriptions else '; descriptions withheld by configuration'}"
         )
 

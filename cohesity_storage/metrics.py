@@ -937,6 +937,30 @@ def _diagnostic_event(fact: Mapping[str, Any]) -> dict | None:
             ),
             **common,
         }
+    if kind.startswith("alert_"):
+        return _alert_event(kind, fact)
+    if kind == "run_status_unknown":
+        return _run_status_unknown_event(fact)
+    if kind == "host_link":
+        return _host_link_event(fact)
+    if kind == "storage_domain_stats_fields":
+        fields = [str(item) for item in fact.get("fields") or []][:MAX_DIAGNOSTIC_FIELDS]
+        return {
+            "severity": SEVERITY_INFO,
+            "content": (
+                f"storage domain stats fields ({len(fields)}): {', '.join(fields) or 'none'}"
+            ),
+            "cohesity.diagnostic": kind,
+            "cohesity.stats_fields": ", ".join(fields),
+        }
+    return None
+
+
+
+def _alert_event(kind: str, fact: Mapping[str, Any]) -> dict | None:
+    """The alert-collection facts. Extracted from :func:`_diagnostic_event` for its
+    complexity budget, exactly as the run-status and host-link records were.
+    """
     if kind == "alert_source":
         # Which of the two alert paths this cluster serves. Not answerable from the records:
         # they carry identical fields whichever endpoint produced them.
@@ -963,24 +987,29 @@ def _diagnostic_event(fact: Mapping[str, Any]) -> dict | None:
             "cohesity.diagnostic": kind,
             "cohesity.alert_source": str(fact.get("source") or ""),
         }
-    if kind == "alert_shape":
-        return _alert_shape_event(fact)
-    if kind == "run_status_unknown":
-        return _run_status_unknown_event(fact)
-    if kind == "host_link":
-        return _host_link_event(fact)
-    if kind == "storage_domain_stats_fields":
-        fields = [str(item) for item in fact.get("fields") or []][:MAX_DIAGNOSTIC_FIELDS]
+    if kind == "alert_floor_ignored":
+        # WARN, not INFO. The operator still gets exactly the alerts they asked for, so nothing
+        # is wrong with the output - but the budget was spent on alerts that were then thrown
+        # away, which means the cap can still be hiding severe ones and raising it is the only
+        # lever left.
+        dropped = int(fact.get("dropped") or 0)
+        returned = int(fact.get("returned") or 0)
         return {
-            "severity": SEVERITY_INFO,
+            "severity": SEVERITY_WARN,
             "content": (
-                f"storage domain stats fields ({len(fields)}): {', '.join(fields) or 'none'}"
+                f"the cluster ignored the alertSeverityList request filter: it returned "
+                f"{returned} alert(s) of which {dropped} were below the "
+                f"{fact.get('floor') or 'configured'} floor and were dropped locally. The "
+                f"alerts are correct, but the per-poll budget of "
+                f"{fact.get('max_alerts') or 'unknown'} was spent reading alerts nobody asked "
+                f"for, so raise it if severe alerts look truncated"
             ),
             "cohesity.diagnostic": kind,
-            "cohesity.stats_fields": ", ".join(fields),
+            "cohesity.alert_floor": str(fact.get("floor") or ""),
         }
+    if kind == "alert_shape":
+        return _alert_shape_event(fact)
     return None
-
 
 
 def _alert_shape_event(fact: Mapping[str, Any]) -> dict:
