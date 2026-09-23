@@ -268,7 +268,7 @@ EXT_COHESITY_PROTECTION_GROUP ──protects──▶ HOST
 ```
 
 The join key is the **VMware BIOS UUID**. Dynatrace publishes it on a HOST as
-`host.additional_system_info["system.serial"]`, shaped
+``host.additional_system_info[`system.serial`]``, shaped
 `VMware-00 11 22 33 44 55 66 77-88 99 aa bb cc dd ee ff`; Cohesity publishes it on a protected
 object under `vCenterSummary` as `biosUuid`. Both normalise to
 `00112233-4455-6677-8899-aabbccddeeff`. It is a UUID-to-UUID join, not a hostname match —
@@ -765,7 +765,7 @@ one works with the other.
   and recorded nothing at all. Still once per client per label, and the drain runs after the
   sections so a failure leaves in the poll that produced it.
 - **Can a protection group be joined to a Dynatrace `HOST`?** (ticket 16) A VMware host
-  publishes its BIOS UUID as `host.additional_system_info["system.serial"]`, which normalises to
+  publishes its BIOS UUID as ``host.additional_system_info[`system.serial`]``, which normalises to
   8-4-4-4-12 hex. Whether Cohesity's per-object `uuid` is that same UUID or a Cohesity-internal
   id decides whether the enrichment layer is possible at all, and neither the published schema
   nor anything outside the customer's network answers it. So from v0.1.8 the client asks **one**

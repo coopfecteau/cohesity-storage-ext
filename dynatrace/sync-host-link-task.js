@@ -139,7 +139,7 @@ export default async function ({ execution_id }) {
   //    physical hardware publishes a vendor service tag there, which normalises to '' and is
   //    dropped. Most of a mixed estate is not a VMware guest, and that is fine.
   const hosts = await runDql(
-    'smartscapeNodes "HOST" | fields id, serial = host.additional_system_info["system.serial"]'
+    'smartscapeNodes "HOST" | fields id, serial = host.additional_system_info[`system.serial`]'
   );
   const hostByUuid = new Map();
   for (const host of hosts) {
